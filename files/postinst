@@ -11,12 +11,31 @@ rm -rf /tmp/netbird-runtime
 /etc/init.d/netbird enable
 /etc/init.d/netbird start
 
-# GL.iNet admin panel UI: activate the nginx injection (Applications →
-# NetBird). Only on GL firmware — guarded so the package stays installable
-# on plain OpenWrt where these paths don't exist. Hard restart, not reload:
-# GL's OpenResty caches RPC Lua modules per worker and reload does not
-# reliably clear that cache (gl-tailscale-fix does the same).
-if [ -d /etc/nginx/gl-conf.d ] && [ -x /etc/init.d/nginx ]; then
+# GL.iNet admin panel UI (native OUI page, Applications → NetBird).
+# The shipped /usr/share/oui/menu.d/netbird.json carries default parent_*
+# fields; patch them from an existing Applications entry on this firmware
+# so the item lands in the right sidebar group regardless of GL version.
+MENU=/usr/share/oui/menu.d/netbird.json
+if [ -d /usr/share/oui/menu.d ] && [ -f "$MENU" ]; then
+    ref=""
+    # Prefer a known Applications-group sibling as the reference entry.
+    for view in tailscale zerotier ddns wgserver; do
+        ref="$(grep -l "\"view\": *\"$view\"" /usr/share/oui/menu.d/*.json 2>/dev/null | head -n1)"
+        [ -n "$ref" ] && break
+    done
+    if [ -n "$ref" ] && [ "$ref" != "$MENU" ]; then
+        parent="$(sed -n 's/.*"parent": *"\([^"]*\)".*/\1/p' "$ref" | head -n1)"
+        picon="$(sed -n 's/.*"parent_icon": *"\([^"]*\)".*/\1/p' "$ref" | head -n1)"
+        pindex="$(sed -n 's/.*"parent_index": *\([0-9][0-9]*\).*/\1/p' "$ref" | head -n1)"
+        [ -n "$parent" ] && sed -i "s/\"parent\": *\"[^\"]*\"/\"parent\": \"$parent\"/" "$MENU"
+        [ -n "$picon" ]  && sed -i "s/\"parent_icon\": *\"[^\"]*\"/\"parent_icon\": \"$picon\"/" "$MENU"
+        [ -n "$pindex" ] && sed -i "s/\"parent_index\": *[0-9][0-9]*/\"parent_index\": $pindex/" "$MENU"
+    fi
+fi
+
+# Hard restart of the GL web stack so OpenResty workers pick up the new RPC
+# module and menu entry (reload does not reliably clear per-worker caches).
+if [ -x /etc/init.d/nginx ]; then
     # shellcheck disable=SC2046
     kill -9 $(pgrep nginx) 2>/dev/null
     /etc/init.d/nginx start 2>/dev/null || true

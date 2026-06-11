@@ -206,27 +206,35 @@ refresh the panel (Ctrl/Cmd+Shift+R) and a **NetBird** entry appears in the
   open it in your browser to authorize the router)
 - disconnect (`netbird down`)
 
-How it works (same integration pattern as
-[gl-tailscale-fix](https://github.com/RemoteToHome-io/gl-tailscale-fix) —
-no GL files are modified):
+How it works — **native OUI integration**, the same mechanism GL.iNet uses
+for its own panels (no nginx filters, no DOM injection, no GL files
+modified). The page is a real route in the GL SPA, so sidebar, topbar,
+routing and theming are handled by the panel itself:
 
 ```
-/usr/lib/oui-httpd/rpc/netbird               Lua RPC backend (GL OpenResty dispatcher)
-/etc/nginx/gl-conf.d/netbird-ui.conf         nginx include: filters + static JS
-/usr/share/netbird-ui/netbird-body-filter.lua   injects <script> into the SPA HTML
-/usr/share/netbird-ui/netbird-header-filter.lua content-length fixup
-/usr/share/netbird-ui/www/netbird.js         frontend (menu item + page, vanilla JS)
+/usr/lib/oui-httpd/rpc/netbird                Lua RPC backend (GL OpenResty dispatcher)
+/www/views/gl-sdk4-ui-netbird.common.js.gz    Vue 2 view loaded natively by the panel
+/usr/share/oui/menu.d/netbird.json            sidebar menu entry (Applications group)
 ```
 
-All RPC calls require the panel's `Admin-Token` session cookie; inputs
-(setup key, management URL) are charset-validated before reaching a shell.
-On plain (non-GL) OpenWrt these files are inert and postinst skips the
-nginx reload.
+postinst patches the menu entry's `parent`/`parent_icon`/`parent_index`
+from an existing Applications entry found on the device (Tailscale,
+ZeroTier, DDNS…), so the item lands in the correct group on any GL 4.x
+firmware, then restarts nginx so OpenResty workers pick up the new RPC
+module. Format reference:
+[gl-mt3000-starlink-panel](https://github.com/bigmalloy/gl-mt3000-starlink-panel).
 
-If the page doesn't appear: confirm the GL web stack exists
-(`ls /etc/nginx/gl-conf.d /usr/lib/oui-httpd/rpc`), reload nginx
-(`/etc/init.d/nginx reload`), then hard-refresh the browser. RPC errors are
-visible in the browser dev tools network tab on calls to `/rpc`.
+The view talks to the backend via the panel's own `$rpcRequest` helper
+(falling back to a raw `/rpc` call with the `Admin-Token` cookie on older
+panels); inputs (setup key, management URL) are charset-validated before
+reaching a shell. On plain (non-GL) OpenWrt these files are inert.
+
+If the page doesn't appear: confirm the mechanism exists on your firmware
+(`ls /usr/share/oui/menu.d /www/views | head`), check the menu entry was
+patched (`cat /usr/share/oui/menu.d/netbird.json`), restart nginx
+(`/etc/init.d/nginx restart`), then hard-refresh the browser. RPC errors
+are visible in the browser dev tools network tab on calls to `/rpc`, and
+in `logread` on the router.
 
 ## Maintainer & contributing
 
@@ -264,7 +272,7 @@ files/netbird-wrapper.in     # /usr/sbin/netbird wrapper (compressed layout)
 files/netbird.keep           # sysupgrade keep list -> /lib/upgrade/keep.d/netbird
 files/postinst, files/prerm, files/postrm  # opkg maintainer scripts
 files/ui/rpc/netbird         # GL admin panel: Lua RPC backend
-files/ui/nginx/*             # GL admin panel: nginx include + inject filters
-files/ui/www/netbird.js      # GL admin panel: frontend page (vanilla JS)
+files/ui/menu/netbird.json   # GL admin panel: sidebar menu entry (oui menu.d)
+files/ui/www/gl-sdk4-ui-netbird.common.js  # GL admin panel: native OUI Vue 2 view
 .github/workflows/build.yml  # CI: tag / manual / scheduled builds + releases
 ```

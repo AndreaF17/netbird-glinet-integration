@@ -75,22 +75,24 @@ mkdir -p "$DATA/lib/upgrade/keep.d"
 install -m 0644 "$FILES_DIR/netbird.keep" "$DATA/lib/upgrade/keep.d/netbird"
 
 # ---- GL.iNet admin panel UI (Applications → NetBird) ----
-# Lua RPC backend for GL's OpenResty dispatcher + nginx-injected frontend.
-# Harmless on non-GL systems: postinst only reloads nginx when the GL web
-# stack is present; files in these paths are simply never loaded otherwise.
+# Native OUI integration — the same mechanism GL.iNet uses for its own
+# panels (no nginx filters, no DOM injection):
+#   /usr/lib/oui-httpd/rpc/netbird                  Lua RPC backend
+#   /www/views/gl-sdk4-ui-netbird.common.js.gz     Vue 2 view (must be gzipped)
+#   /usr/share/oui/menu.d/netbird.json             sidebar menu entry
+# postinst patches the menu entry's parent_* fields from an existing
+# Applications entry on the device, so the group metadata always matches
+# the installed firmware. Harmless on non-GL systems: these paths are
+# simply never loaded.
 mkdir -p "$DATA/usr/lib/oui-httpd/rpc" \
-         "$DATA/etc/nginx/gl-conf.d" \
-         "$DATA/usr/share/netbird-ui/www"
+         "$DATA/usr/share/oui/menu.d" \
+         "$DATA/www/views"
 install -m 0644 "$FILES_DIR/ui/rpc/netbird" "$DATA/usr/lib/oui-httpd/rpc/netbird"
-install -m 0644 "$FILES_DIR/ui/nginx/netbird-ui.conf" "$DATA/etc/nginx/gl-conf.d/netbird-ui.conf"
-install -m 0644 "$FILES_DIR/ui/nginx/netbird-header-filter.lua" "$DATA/usr/share/netbird-ui/netbird-header-filter.lua"
-# {{VERSION}} stamping cache-busts the frontend JS after upgrades.
-sed "s/{{VERSION}}/${FULLVER}/g" "$FILES_DIR/ui/nginx/netbird-body-filter.lua" \
-    > "$DATA/usr/share/netbird-ui/netbird-body-filter.lua"
-chmod 0644 "$DATA/usr/share/netbird-ui/netbird-body-filter.lua"
-sed "s/{{VERSION}}/${FULLVER}/g" "$FILES_DIR/ui/www/netbird.js" \
-    > "$DATA/usr/share/netbird-ui/www/netbird.js"
-chmod 0644 "$DATA/usr/share/netbird-ui/www/netbird.js"
+install -m 0644 "$FILES_DIR/ui/menu/netbird.json" "$DATA/usr/share/oui/menu.d/netbird.json"
+# {{VERSION}} stamping shows the package version in the page footer.
+sed "s/{{VERSION}}/${FULLVER}/g" "$FILES_DIR/ui/www/gl-sdk4-ui-netbird.common.js" \
+    | gzip -9n > "$DATA/www/views/gl-sdk4-ui-netbird.common.js.gz"
+chmod 0644 "$DATA/www/views/gl-sdk4-ui-netbird.common.js.gz"
 
 INSTALLED_SIZE="$(du -sb "$DATA" | cut -f1)"
 

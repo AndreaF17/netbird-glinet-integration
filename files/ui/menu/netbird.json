@@ -1,0 +1,12 @@
+{
+    "index": 90,
+    "view": "netbird",
+    "title": "NetBird",
+    "level": 2,
+    "parent": "application",
+    "parent_icon": "application",
+    "parent_index": 56,
+    "show_mode": [
+        "router"
+    ]
+}
