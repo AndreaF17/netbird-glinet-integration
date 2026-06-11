@@ -122,6 +122,44 @@ survives and the daemon reconnects automatically after install. (It is
 deliberately not listed as a conffile: opkg errors trying to checksum a
 conffile that isn't installed yet.)
 
+## Firmware upgrades (sysupgrade)
+
+The package installs `/lib/upgrade/keep.d/netbird` (same mechanism
+[gl-tailscale-fix](https://github.com/RemoteToHome-io/gl-tailscale-fix)
+uses): every path it lists is backed up by a firmware upgrade with **"keep
+settings"** enabled and restored onto the fresh overlay after the flash.
+Without it, a GL firmware upgrade silently wipes the package *and* the
+enrollment — the VPN just disappears.
+
+The list keeps the **full runtime**, not just the config:
+
+- `/etc/netbird/` — enrollment config / device identity (`config.json`)
+- `/etc/init.d/netbird` + the `/etc/rc.d/S99netbird` / `K10netbird`
+  symlinks, so the service autostarts on first boot after the flash
+- `/usr/sbin/netbird` (wrapper) and `/usr/libexec/netbird/netbird.gz`
+  (gzipped binary; with `COMPRESS_BINARY=0` builds the plain binary is
+  `/usr/sbin/netbird` and the missing `.gz` path is skipped)
+- the keep list itself, so persistence survives the *next* upgrade too
+
+So netbird reconnects right after a "keep settings" firmware flash, with
+no reinstall needed. Trade-off: the gzipped binary adds ~13 MB to the
+sysupgrade backup archive — fine on this device, since the fresh overlay
+has at least as much free space as the package occupied before the flash.
+
+Two things are deliberately **not** kept, and come back when you reinstall
+the ipk:
+
+- **The GL admin panel page** (nginx injection + RPC files). A firmware
+  upgrade may ship a different panel; reinstalling re-applies the
+  integration cleanly against whatever the new firmware provides.
+- **opkg's package database** — after a sysupgrade, `opkg list-installed`
+  no longer shows netbird even though it is running. Reinstall the ipk at
+  your convenience to restore opkg tracking (and the panel page); the
+  install simply overwrites the kept files.
+
+Firmware upgrades with "keep settings" **disabled** wipe everything,
+including the enrollment — that's a factory reset, reinstall and re-enroll.
+
 ## Uninstalling
 
 ```sh
@@ -223,6 +261,7 @@ scripts/compile.sh           # static Go cross-compile (runs in container)
 scripts/mkipk.sh             # legacy-format ipk assembly (runs in container)
 files/netbird.init           # procd init script -> /etc/init.d/netbird
 files/netbird-wrapper.in     # /usr/sbin/netbird wrapper (compressed layout)
+files/netbird.keep           # sysupgrade keep list -> /lib/upgrade/keep.d/netbird
 files/postinst, files/prerm, files/postrm  # opkg maintainer scripts
 files/ui/rpc/netbird         # GL admin panel: Lua RPC backend
 files/ui/nginx/*             # GL admin panel: nginx include + inject filters

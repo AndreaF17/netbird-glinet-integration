@@ -2,10 +2,13 @@
  * netbird: NetBird settings page for the GL.iNet 4.x admin panel.
  *
  * Injected into the GL SPA via nginx body filter. Adds a "NetBird" entry
- * under the Applications menu group and renders a settings page inside the
- * SPA's content area, keeping the sidebar/topbar mounted. The URL hash is
- * deliberately never changed: an unknown route would make the Vue router
- * unmount the whole layout. Talks to /usr/lib/oui-httpd/rpc/netbird via /rpc.
+ * under the Applications menu group and renders the settings page as a
+ * fixed overlay covering the SPA's content area (measured from the live
+ * sidebar/topbar geometry), so the sidebar and topbar stay visible and
+ * interactive. The URL hash is deliberately never changed: an unknown
+ * route would make the Vue router unmount the whole layout. This avoids
+ * any dependency on GL's internal (compiled, undocumented) DOM structure.
+ * Talks to /usr/lib/oui-httpd/rpc/netbird via /rpc.
  *
  * Injection pattern based on gl-tailscale-fix (GPL-3.0).
  */
@@ -43,7 +46,12 @@ function injectStyles() {
   var style = document.createElement('style');
   style.id = 'nb-styles';
   style.textContent = [
-    '#netbird-page { padding: 20px; max-width: 860px; }',
+    // The page is a fixed overlay over the SPA content area; top/left are
+    // set inline from the measured sidebar/topbar geometry.
+    '#netbird-page { position: fixed; right: 0; bottom: 0; overflow-y: auto; z-index: 1000; padding: 20px; background: #f5f6fa; -webkit-overflow-scrolling: touch; }',
+    '#netbird-page.nb-dark { background: #17171d; }',
+    '#netbird-page .nb-card, #netbird-page .nb-banner { max-width: 860px; margin-left: auto; margin-right: auto; }',
+    '#netbird-page .nb-footer { max-width: 860px; margin: 0 auto; }',
     '.nb-card { background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 16px; overflow: hidden; }',
     '.nb-card-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #ebebf0; font-size: 15px; font-weight: 600; color: #303133; }',
     '.nb-badge { font-size: 11px; font-weight: 400; color: #a0a0a3; }',
@@ -110,8 +118,6 @@ var active = false;          // our page currently shown
 var prevActiveItem = null;   // SPA menu item that was highlighted before ours
 var pollTimer = null;
 var logTimer = null;
-var hiddenSiblings = [];
-var containerObserver = null;
 var busy = false;            // a connect/disconnect/service action running
 
 // Defensive getters over `netbird status --json` (field names vary slightly
@@ -540,66 +546,60 @@ function doService(action) {
 
 // ------------------------------------------------- Page mount/unmount ----
 
-function findContentContainer() {
-  var c = document.querySelector('.el-main')
-    || document.querySelector('main')
-    || document.querySelector('#app .app-main')
-    || document.querySelector('#app .main-content');
-  if (c) return c;
-  // Fallback: the content area is the widest sibling of the sidebar column.
-  // Never fall back to #app itself — hiding its children would remove the
-  // sidebar/topbar (the SPA chrome must stay).
-  var aside = document.querySelector('.el-aside, aside, .sidebar, .nav-side');
-  if (aside && aside.parentNode) {
-    var sibs = aside.parentNode.children;
-    for (var i = 0; i < sibs.length; i++) {
-      if (sibs[i] !== aside && sibs[i].offsetWidth > aside.offsetWidth) {
-        return sibs[i];
-      }
+// The page is a fixed overlay covering the viewport area to the right of
+// the sidebar and below the topbar. The insets are measured from the live
+// DOM, so nothing depends on GL's compiled class names: if neither bar is
+// found the overlay simply covers the whole viewport (still functional).
+function overlayInsets() {
+  var top = 0, left = 0;
+  var vw = window.innerWidth, vh = window.innerHeight;
+  var i, r, c;
+
+  // Sidebar: anchored at the left edge, tall and narrow
+  var sides = document.querySelectorAll(
+    '.el-aside, aside, nav, [class*="sidebar"], [class*="side-bar"], [class*="aside"], [class*="menu-wrap"]');
+  for (i = 0; i < sides.length; i++) {
+    c = sides[i];
+    if (c.closest && c.closest('#' + PAGE_ID)) continue;
+    r = c.getBoundingClientRect();
+    if (r.left <= 2 && r.width >= 100 && r.width <= vw * 0.5 && r.height >= vh * 0.5) {
+      if (r.right > left) left = r.right;
     }
   }
-  return null;
+
+  // Topbar: anchored at the top edge, wide and short
+  var tops = document.querySelectorAll(
+    '.el-header, header, [class*="topbar"], [class*="top-bar"], [class*="navbar"], [class*="header"]');
+  for (i = 0; i < tops.length; i++) {
+    c = tops[i];
+    if (c.closest && c.closest('#' + PAGE_ID)) continue;
+    r = c.getBoundingClientRect();
+    if (r.top <= 2 && r.height >= 30 && r.height <= 150 && r.width >= vw * 0.5) {
+      if (r.bottom > top) top = r.bottom;
+    }
+  }
+
+  return {top: top, left: left};
+}
+
+function applyInsets() {
+  var page = document.getElementById(PAGE_ID);
+  if (!page) return;
+  var ins = overlayInsets();
+  page.style.top = ins.top + 'px';
+  page.style.left = ins.left + 'px';
 }
 
 function mountPage() {
-  if (document.getElementById(PAGE_ID)) return;
-  var container = findContentContainer();
-  if (!container) return;
+  if (document.getElementById(PAGE_ID)) { applyInsets(); return; }
 
   injectStyles();
-
-  // Hide whatever the SPA currently renders in the content area
-  hiddenSiblings = [];
-  Array.prototype.forEach.call(container.children, function(child) {
-    if (child.id === PAGE_ID) return;
-    if (child.style.display !== 'none') {
-      hiddenSiblings.push(child);
-      child.style.display = 'none';
-    }
-  });
-
-  container.appendChild(buildPage());
-
-  // Vue may re-render the content area while we're active (e.g. the router
-  // reacting to the unknown route) — keep hiding anything that appears.
-  if (!containerObserver) {
-    containerObserver = new MutationObserver(function() {
-      if (!active) return;
-      var c = findContentContainer();
-      if (!c) return;
-      Array.prototype.forEach.call(c.children, function(child) {
-        if (child.id !== PAGE_ID && child.style.display !== 'none') {
-          hiddenSiblings.push(child);
-          child.style.display = 'none';
-        }
-      });
-      if (!document.getElementById(PAGE_ID)) {
-        c.appendChild(buildPage());
-        refreshUI();
-      }
-    });
-    containerObserver.observe(container, {childList: true});
-  }
+  document.body.appendChild(buildPage());
+  applyInsets();
+  // The SPA may still be animating/expanding the menu — re-measure shortly.
+  setTimeout(applyInsets, 300);
+  setTimeout(applyInsets, 1000);
+  window.addEventListener('resize', applyInsets);
 
   startPolling();
   refreshUI();
@@ -608,11 +608,7 @@ function mountPage() {
 function unmountPage() {
   var page = document.getElementById(PAGE_ID);
   if (page && page.parentNode) page.parentNode.removeChild(page);
-  hiddenSiblings.forEach(function(elm) {
-    try { elm.style.display = ''; } catch (e) {}
-  });
-  hiddenSiblings = [];
-  if (containerObserver) { containerObserver.disconnect(); containerObserver = null; }
+  window.removeEventListener('resize', applyInsets);
   stopPolling();
 }
 

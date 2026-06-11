@@ -1,0 +1,28 @@
+# Installed at /lib/upgrade/keep.d/netbird. On a firmware sysupgrade with
+# "keep settings" enabled, OpenWrt backs up every path listed under
+# /lib/upgrade/keep.d/ and restores it onto the fresh overlay after the
+# flash (same mechanism gl-tailscale-fix uses for its keep.d entry).
+#
+# The full runtime is listed -- not just the enrollment config -- so the
+# VPN reconnects right after a firmware upgrade without reinstalling the
+# ipk. Paths that don't exist in a given layout (COMPRESS_BINARY=0 vs 1)
+# are silently skipped by sysupgrade's file collection.
+
+# Enrollment / device identity (config.json lives here)
+/etc/netbird/
+
+# Service: init script + the rc.d symlinks "/etc/init.d/netbird enable"
+# created (START=99 / STOP=10); without these the service won't autostart
+# on the first boot after the flash.
+/etc/init.d/netbird
+/etc/rc.d/S99netbird
+/etc/rc.d/K10netbird
+
+# Binary: wrapper + gzipped payload (default layout), or the plain binary
+# at /usr/sbin/netbird when built with COMPRESS_BINARY=0 (netbird.gz then
+# simply doesn't exist and is skipped).
+/usr/sbin/netbird
+/usr/libexec/netbird/netbird.gz
+
+# This list itself, so persistence survives the next upgrade too.
+/lib/upgrade/keep.d/netbird

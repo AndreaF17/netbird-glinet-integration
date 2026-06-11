@@ -68,6 +68,12 @@ install -m 0755 "$FILES_DIR/netbird.init" "$DATA/etc/init.d/netbird"
 # deliberately NOT shipped: opkg never deletes files it did not install, and
 # shipping an empty JSON file would break netbird's config parser.
 
+# sysupgrade persistence: paths listed under /lib/upgrade/keep.d/ survive a
+# firmware flash with "keep settings" (enrollment config + runtime, so the
+# VPN reconnects without reinstalling the ipk). See files/netbird.keep.
+mkdir -p "$DATA/lib/upgrade/keep.d"
+install -m 0644 "$FILES_DIR/netbird.keep" "$DATA/lib/upgrade/keep.d/netbird"
+
 # ---- GL.iNet admin panel UI (Applications → NetBird) ----
 # Lua RPC backend for GL's OpenResty dispatcher + nginx-injected frontend.
 # Harmless on non-GL systems: postinst only reloads nginx when the GL web
