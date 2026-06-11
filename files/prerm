@@ -1,0 +1,8 @@
+#!/bin/sh
+# Stop and disable the service before files are removed (live system only).
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+
+/etc/init.d/netbird stop 2>/dev/null || true
+/etc/init.d/netbird disable 2>/dev/null || true
+
+exit 0

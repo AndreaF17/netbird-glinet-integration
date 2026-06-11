@@ -1,0 +1,265 @@
+--[[
+    @object-name: netbird
+    @object-desc: NetBird client control for the GL.iNet admin panel.
+
+    Loaded by GL's OpenResty RPC dispatcher from /usr/lib/oui-httpd/rpc/.
+    Called from the injected frontend via POST /rpc:
+      {"jsonrpc":"2.0","method":"call","params":[<Admin-Token>,"netbird","<method>",{...}]}
+
+    Pattern follows gl-tailscale-fix (GPL-3.0, RemoteToHome-io/gl-tailscale-fix).
+--]]
+
+local cjson = require "cjson"
+
+local M = {}
+
+local BIN = "/usr/sbin/netbird"
+local INIT = "/etc/init.d/netbird"
+local UP_LOG = "/tmp/netbird-up.log"
+local UP_LOCK = "/tmp/netbird-up.lock"
+
+-- Cached version. Invalidated per-worker when the netbird binary mtime
+-- changes (e.g. after a package upgrade). Each nginx worker holds its own
+-- cache; the mtime check ensures re-read without an nginx restart.
+local cached_version = nil
+local cached_version_mtime = 0
+
+-- Helper: run a command and return stdout
+local function exec(cmd)
+    local r = ngx.pipe.spawn({"sh", "-c", cmd})
+    if r then
+        local data = r:stdout_read_all()
+        r:wait()
+        return data
+    end
+    return nil
+end
+
+-- Helper: run a command and return exit code
+local function exec_rc(cmd)
+    local r = ngx.pipe.spawn({"sh", "-c", cmd})
+    if r then
+        r:stdout_read_all()
+        local ok, _, code = r:wait()
+        if ok then return 0 end
+        return code or 1
+    end
+    return 1
+end
+
+-- Helper: file exists
+local function file_exists(path)
+    local f = io.open(path, "r")
+    if f then f:close() return true end
+    return false
+end
+
+-- Helper: mtime via BusyBox "date -r" (GL routers don't ship stat in PATH)
+local function file_mtime(path)
+    local r = ngx.pipe.spawn({"date", "-r", path, "+%s"})
+    if not r then return 0 end
+    local data = r:stdout_read_all()
+    r:wait()
+    return tonumber((data or ""):match("^(%d+)")) or 0
+end
+
+local function get_version()
+    local mtime = file_mtime(BIN)
+    if cached_version and mtime > 0 and mtime == cached_version_mtime then
+        return cached_version
+    end
+    local ver = exec(BIN .. " version 2>/dev/null")
+    cached_version = ver and ver:match("^(%S+)") or "unknown"
+    cached_version_mtime = mtime
+    return cached_version
+end
+
+-- Helper: is the netbird daemon running?
+-- Guard with pgrep before spawning the CLI: if the daemon is down, the
+-- large Go CLI process would hang until timeout — wasteful on small routers.
+-- Matches both layouts: plain /usr/sbin/netbird AND the compressed-binary
+-- wrapper (real process is /tmp/netbird-runtime/netbird-<ver> service run).
+local function daemon_running()
+    return exec_rc("pgrep -f 'netbird[^ ]* service' >/dev/null 2>&1") == 0
+end
+
+-- Helper: parsed `netbird status --json`, or nil
+-- Generous timeout: with the compressed-binary layout the first CLI call
+-- after boot gunzips ~36MB to /tmp before running.
+local function netbird_status()
+    if not daemon_running() then return nil end
+    local data = exec("timeout 10 " .. BIN .. " status --json 2>/dev/null")
+    if data and #data > 0 then
+        local ok, r = pcall(cjson.decode, data)
+        if ok and type(r) == "table" then
+            return r
+        end
+    end
+    return nil
+end
+
+-- Input validation. Values are passed to a shell command line, so the
+-- charset is strict: no quotes, spaces, semicolons, backticks, etc.
+local function valid_setup_key(s)
+    return type(s) == "string" and #s > 0 and #s <= 128
+        and s:match("^[%w%-]+$") ~= nil
+end
+
+local function valid_url(s)
+    return type(s) == "string" and #s > 0 and #s <= 256
+        and s:match("^https?://[%w%.%-_]+[%w%.%-_:/]*$") ~= nil
+end
+
+--[[
+    @method-type: call
+    @method-name: get_status
+    @method-desc: Live NetBird state for the settings page.
+
+    @out bool   installed       netbird binary present
+    @out bool   enabled         service enabled at boot
+    @out bool   running         daemon process running
+    @out string version         installed netbird version
+    @out object status          parsed `netbird status --json` (null when daemon down)
+    @out bool   up_in_progress  a `netbird up` launched from this UI is still running
+--]]
+function M.get_status()
+    local res = {}
+    res.installed = file_exists(BIN)
+    res.enabled = exec_rc(INIT .. " enabled") == 0
+    res.running = daemon_running()
+    res.version = get_version()
+    res.up_in_progress = file_exists(UP_LOCK)
+
+    local status = netbird_status()
+    if status then
+        res.status = status
+    end
+
+    return res
+end
+
+--[[
+    @method-type: call
+    @method-name: up
+    @method-desc: Connect to a NetBird network (runs `netbird up` in background).
+                  With a setup key: headless enrollment. Without: SSO flow —
+                  the login URL appears in the log (see get_up_log).
+
+    @in string ?setup_key       NetBird setup key (alphanumeric/dashes)
+    @in string ?management_url  Self-hosted management URL (default api.netbird.io)
+--]]
+function M.up(params)
+    if not file_exists(BIN) then
+        return { err_code = -1, err_msg = "netbird binary not found" }
+    end
+    if not daemon_running() then
+        exec_rc(INIT .. " start")
+        -- give procd a moment; `netbird up` retries the socket anyway
+    end
+    if file_exists(UP_LOCK) then
+        return { err_code = -2, err_msg = "A connect attempt is already in progress" }
+    end
+
+    local args = ""
+    if params.setup_key ~= nil and params.setup_key ~= "" then
+        if not valid_setup_key(params.setup_key) then
+            return { err_code = -3, err_msg = "Invalid setup key format" }
+        end
+        args = args .. " --setup-key " .. params.setup_key
+    end
+    if params.management_url ~= nil and params.management_url ~= "" then
+        if not valid_url(params.management_url) then
+            return { err_code = -4, err_msg = "Invalid management URL" }
+        end
+        args = args .. " --management-url " .. params.management_url
+    end
+
+    -- Background with lock + log so the UI can poll progress. The charset
+    -- validation above makes the interpolation shell-safe.
+    local cmd = "touch " .. UP_LOCK .. "; "
+        .. "(timeout 90 " .. BIN .. " up" .. args .. " > " .. UP_LOG .. " 2>&1; "
+        .. "echo \"[exit code: $?]\" >> " .. UP_LOG .. "; "
+        .. "rm -f " .. UP_LOCK .. ") &"
+    ngx.pipe.spawn({"sh", "-c", cmd})
+
+    return { status = "up_started" }
+end
+
+--[[
+    @method-type: call
+    @method-name: down
+    @method-desc: Disconnect from the NetBird network (`netbird down`).
+--]]
+function M.down()
+    if not daemon_running() then
+        return { err_code = -1, err_msg = "NetBird daemon is not running" }
+    end
+    ngx.pipe.spawn({"sh", "-c", "timeout 15 " .. BIN .. " down >/dev/null 2>&1 &"})
+    return { status = "down_started" }
+end
+
+--[[
+    @method-type: call
+    @method-name: get_up_log
+    @method-desc: Tail of the last `netbird up` output (login URL, errors).
+
+    @out string log         last 4KB of the up log
+    @out bool   in_progress connect attempt still running
+--]]
+function M.get_up_log()
+    local res = { log = "", in_progress = file_exists(UP_LOCK) }
+    local f = io.open(UP_LOG, "r")
+    if f then
+        local size = f:seek("end")
+        local from = size > 4096 and size - 4096 or 0
+        f:seek("set", from)
+        res.log = f:read("*a") or ""
+        f:close()
+    end
+    return res
+end
+
+--[[
+    @method-type: call
+    @method-name: service
+    @method-desc: Control the netbird init service.
+
+    @in string action  one of: start, stop, restart, enable, disable
+--]]
+function M.service(params)
+    local allowed = {
+        start = true, stop = true, restart = true,
+        enable = true, disable = true,
+    }
+    local action = params.action
+    if type(action) ~= "string" or not allowed[action] then
+        return { err_code = -1, err_msg = "Invalid action" }
+    end
+    -- start/stop/restart can block for a few seconds — run detached for
+    -- stop/restart of a connected daemon, synchronous is fine for the rest.
+    local rc = exec_rc(INIT .. " " .. action .. " >/dev/null 2>&1")
+    if rc ~= 0 and (action == "enable" or action == "disable") then
+        -- rc.common enable returns non-zero on some 19.07 builds even on
+        -- success; verify with `enabled` before reporting failure.
+        local now_enabled = exec_rc(INIT .. " enabled") == 0
+        if (action == "enable") == now_enabled then rc = 0 end
+    end
+    if rc ~= 0 then
+        return { err_code = -2, err_msg = "Action '" .. action .. "' failed (rc=" .. rc .. ")" }
+    end
+    return {}
+end
+
+--[[
+    @method-type: call
+    @method-name: get_log
+    @method-desc: Recent netbird daemon log lines from logread.
+
+    @out string log  last ~50 matching lines
+--]]
+function M.get_log()
+    local data = exec("logread 2>/dev/null | grep -i netbird | tail -n 50")
+    return { log = data or "" }
+end
+
+return M

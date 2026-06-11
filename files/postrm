@@ -1,0 +1,18 @@
+#!/bin/sh
+# After package files are removed: drop the nginx body-filter injection so
+# the admin panel stops loading the (now deleted) NetBird page. Live
+# systems only — and only where the GL web stack exists.
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+
+# Extracted runtime binary (compressed-binary layout) lives in RAM; clean it.
+rm -rf /tmp/netbird-runtime /tmp/netbird-up.log /tmp/netbird-up.lock
+
+# Hard restart, not reload: OpenResty workers cache the (now deleted) RPC
+# module and body filter until fully restarted.
+if [ -x /etc/init.d/nginx ]; then
+    # shellcheck disable=SC2046
+    kill -9 $(pgrep nginx) 2>/dev/null
+    /etc/init.d/nginx start 2>/dev/null || true
+fi
+
+exit 0

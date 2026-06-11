@@ -1,0 +1,102 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      netbird_version:
+        description: "NetBird version to build (e.g. 0.72.3). Empty = latest release."
+        required: false
+        default: ""
+  schedule:
+    # Daily check for new netbird releases.
+    - cron: "23 5 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      proceed: ${{ steps.resolve.outputs.proceed }}
+    steps:
+      - name: Resolve netbird version
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.netbird_version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -eu
+          case "$EVENT" in
+            push)
+              VER="${REF_NAME#v}"
+              ;;
+            workflow_dispatch)
+              VER="${INPUT_VERSION#v}"
+              ;;
+            *)
+              VER=""
+              ;;
+          esac
+          if [ -z "$VER" ]; then
+            VER="$(curl -fsSL https://api.github.com/repos/netbirdio/netbird/releases/latest \
+              | jq -r '.tag_name | ltrimstr("v")')"
+          fi
+          [ -n "$VER" ] && [ "$VER" != "null" ]
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+          # On the scheduled run, skip if we already published this version.
+          PROCEED=true
+          if [ "$EVENT" = "schedule" ] && gh release view "v$VER" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v$VER already exists, nothing to do."
+            PROCEED=false
+          fi
+          echo "proceed=$PROCEED" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .ipk
+        env:
+          NETBIRD_VERSION: ${{ needs.resolve.outputs.version }}
+        run: ./build.sh
+
+      - name: Checksums
+        run: |
+          cd out
+          sha256sum netbird_*.ipk > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: netbird-ipk-${{ needs.resolve.outputs.version }}
+          path: |
+            out/netbird_*.ipk
+            out/sha256sums.txt
+
+      - name: Publish release
+        # Tag pushes, manual dispatches and scheduled new-version builds all
+        # publish a release named after the netbird version.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -eu
+          TAG="v$VER"
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+              --title "netbird $VER for GL.iNet GL-X2000" \
+              --notes "Static NetBird client $VER packaged as .ipk for aarch64_cortex-a53_neon-vfpv4 (GL-X2000). Built from https://github.com/netbirdio/netbird/releases/tag/$TAG"
+          fi
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber \
+            out/netbird_*.ipk out/sha256sums.txt

@@ -1,0 +1,25 @@
+#!/bin/sh
+# Enable and start the service on a live system only. When the package is
+# installed into an image build root, IPKG_INSTROOT is set and there is no
+# running procd to talk to.
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+
+# Drop binaries extracted to RAM by a previous version (compressed-binary
+# layout); the wrapper re-extracts the new one on first use.
+rm -rf /tmp/netbird-runtime
+
+/etc/init.d/netbird enable
+/etc/init.d/netbird start
+
+# GL.iNet admin panel UI: activate the nginx injection (Applications →
+# NetBird). Only on GL firmware — guarded so the package stays installable
+# on plain OpenWrt where these paths don't exist. Hard restart, not reload:
+# GL's OpenResty caches RPC Lua modules per worker and reload does not
+# reliably clear that cache (gl-tailscale-fix does the same).
+if [ -d /etc/nginx/gl-conf.d ] && [ -x /etc/init.d/nginx ]; then
+    # shellcheck disable=SC2046
+    kill -9 $(pgrep nginx) 2>/dev/null
+    /etc/init.d/nginx start 2>/dev/null || true
+fi
+
+exit 0

@@ -1,0 +1,24 @@
+#!/bin/sh
+# The netbird binary ships gzip-compressed because the GL-X2000's flash is
+# too small for the ~36 MB uncompressed binary. It is decompressed once into
+# RAM-backed /tmp and reused for every invocation; the version-suffixed
+# filename makes upgrades re-extract automatically. @VERSION@ is substituted
+# by scripts/mkipk.sh at package time.
+BIN_GZ=/usr/libexec/netbird/netbird.gz
+RUNTIME_DIR=/tmp/netbird-runtime
+BIN="$RUNTIME_DIR/netbird-@VERSION@"
+
+if [ ! -x "$BIN" ]; then
+	mkdir -p "$RUNTIME_DIR"
+	TMP="$BIN.$$.tmp"
+	if ! gunzip -c "$BIN_GZ" > "$TMP"; then
+		rm -f "$TMP"
+		echo "netbird: failed to decompress $BIN_GZ (out of RAM in /tmp?)" >&2
+		exit 1
+	fi
+	chmod 0755 "$TMP"
+	# Atomic rename: concurrent invocations each extract to their own
+	# $$-suffixed file and the last rename wins with a complete binary.
+	mv "$TMP" "$BIN"
+fi
+exec "$BIN" "$@"

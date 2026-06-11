@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+# procd init script for the NetBird client (OpenWrt 19.07 / GL.iNet QSDK).
+
+START=99
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/sbin/netbird
+CONFIG=/etc/netbird/config.json
+STATE_DIR=/var/lib/netbird
+
+start_service() {
+	# /var is tmpfs on OpenWrt; recreate state dir on every boot.
+	mkdir -p /etc/netbird "$STATE_DIR"
+
+	procd_open_instance
+	procd_set_param command "$PROG" service run \
+		--config "$CONFIG" \
+		--log-file console
+	# Volatile state is intentional: it spares the small overlay flash, and
+	# the device identity lives in $CONFIG which is persistent. SSH config
+	# management is disabled like in the official OpenWrt package.
+	procd_set_param env NB_STATE_DIR="$STATE_DIR" NB_DISABLE_SSH_CONFIG=1
+	procd_set_param respawn 3600 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param file "$CONFIG"
+	procd_close_instance
+}
