@@ -17,13 +17,19 @@ permissions:
   contents: write
 
 jobs:
+  # Two version axes, deliberately decoupled:
+  #   - this repo's own tags (v0.1, v0.2, ...) version the integration;
+  #     pushing one builds the LATEST upstream netbird into that release.
+  #   - automated upstream tracking publishes under netbird-v<X.Y.Z> tags
+  #     (scheduled daily check, and manual dispatch with a version input).
   resolve:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
       proceed: ${{ steps.resolve.outputs.proceed }}
     steps:
-      - name: Resolve netbird version
+      - name: Resolve netbird version and release tag
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
@@ -32,17 +38,10 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -eu
-          case "$EVENT" in
-            push)
-              VER="${REF_NAME#v}"
-              ;;
-            workflow_dispatch)
-              VER="${INPUT_VERSION#v}"
-              ;;
-            *)
-              VER=""
-              ;;
-          esac
+          VER=""
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            VER="${INPUT_VERSION#v}"
+          fi
           if [ -z "$VER" ]; then
             VER="$(curl -fsSL https://api.github.com/repos/netbirdio/netbird/releases/latest \
               | jq -r '.tag_name | ltrimstr("v")')"
@@ -50,10 +49,19 @@ jobs:
           [ -n "$VER" ] && [ "$VER" != "null" ]
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
-          # On the scheduled run, skip if we already published this version.
+          if [ "$EVENT" = "push" ]; then
+            # Integration release: the pushed repo tag names the release.
+            RELEASE_TAG="$REF_NAME"
+          else
+            RELEASE_TAG="netbird-v$VER"
+          fi
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+          # On the scheduled run, skip if this upstream version was already
+          # published by a previous scheduled/dispatch build.
           PROCEED=true
-          if [ "$EVENT" = "schedule" ] && gh release view "v$VER" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release v$VER already exists, nothing to do."
+          if [ "$EVENT" = "schedule" ] && gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists, nothing to do."
             PROCEED=false
           fi
           echo "proceed=$PROCEED" >> "$GITHUB_OUTPUT"
@@ -85,18 +93,18 @@ jobs:
             out/sha256sums.txt
 
       - name: Publish release
-        # Tag pushes, manual dispatches and scheduled new-version builds all
-        # publish a release named after the netbird version.
+        # Integration tag pushes release under the pushed tag; scheduled and
+        # dispatched upstream builds release under netbird-v<X.Y.Z>.
         env:
           GH_TOKEN: ${{ github.token }}
           VER: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.release_tag }}
         run: |
           set -eu
-          TAG="v$VER"
           if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
-              --title "netbird $VER for GL.iNet GL-X2000" \
-              --notes "Static NetBird client $VER packaged as .ipk for aarch64_cortex-a53_neon-vfpv4 (GL-X2000). Built from https://github.com/netbirdio/netbird/releases/tag/$TAG"
+              --title "netbird $VER for GL.iNet GL-X2000 ($TAG)" \
+              --notes "Static NetBird client $VER packaged as .ipk for aarch64_cortex-a53_neon-vfpv4 (GL-X2000). Built from https://github.com/netbirdio/netbird/releases/tag/v$VER"
           fi
           gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber \
             out/netbird_*.ipk out/sha256sums.txt

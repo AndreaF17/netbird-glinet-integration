@@ -194,12 +194,13 @@ Maintained by [Andrea (@AndreaF17)](https://github.com/AndreaF17).
 
 `.github/workflows/build.yml`:
 
-- **Tag push** (`v<netbird-version>`) → builds that version, publishes a
-  GitHub release with the `.ipk` + `sha256sums.txt`.
+- **Tag push** (`v0.1`, `v0.2`, … — this repo's own versions) → builds the
+  **latest** upstream netbird and publishes it as a GitHub release under
+  the pushed tag, with the `.ipk` + `sha256sums.txt`.
 - **Manual run** (`workflow_dispatch`) → optional `netbird_version` input
-  (empty = latest upstream release).
-- **Daily schedule** → checks for a new upstream netbird release; if this
-  repo has no matching release yet, it builds and publishes one
+  (empty = latest upstream); publishes under a `netbird-v<X.Y.Z>` tag.
+- **Daily schedule** → checks for a new upstream netbird release; if no
+  `netbird-v<X.Y.Z>` release exists here yet, builds and publishes it
   automatically.
 
 ## Repo layout
