@@ -102,15 +102,25 @@ netbird status
 
 ## Upgrading
 
+On the GL-X2000, **remove the old version first**:
+
 ```sh
 scp ./out/netbird_<newver>_*.ipk root@192.168.8.1:/tmp/
-ssh root@192.168.8.1 "opkg install /tmp/netbird_<newver>_*.ipk"
+ssh root@192.168.8.1 "opkg remove netbird && opkg install /tmp/netbird_<newver>_*.ipk"
 ```
 
+A direct `opkg install` of the new ipk fails with *"Only have NNNNkb
+available on filesystem /overlay"*: opkg demands the new package's full
+~13 MB while the old copy still occupies its ~13 MB, and it does not credit
+the space freed by replacing it — two copies never fit in the ~24 MB
+overlay. Removing first sidesteps this. (`--force-space` skips the check
+but risks a half-written install if space truly runs out.)
+
 `/etc/netbird/config.json` is generated at runtime and never shipped in the
-package, so opkg leaves it alone on upgrade and removal — your enrollment
-survives upgrades. (It is deliberately not listed as a conffile: opkg
-errors trying to checksum a conffile that isn't installed yet.)
+package, so opkg leaves it alone on remove/upgrade — your enrollment
+survives and the daemon reconnects automatically after install. (It is
+deliberately not listed as a conffile: opkg errors trying to checksum a
+conffile that isn't installed yet.)
 
 ## Uninstalling
 
