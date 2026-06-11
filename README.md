@@ -4,8 +4,7 @@ Builds the [NetBird](https://github.com/netbirdio/netbird) VPN client from
 source and packages it as an installable `.ipk` for the **GL.iNet GL-X2000**
 (firmware 4.7.x, QSDK-based OpenWrt 19.07 fork, `ipq50xx`, kernel 5.4, musl).
 
-Maintained by [Andrea (@AndreaF17)](https://github.com/AndreaF17) at
-[AndreaF17/netbird-glinet-integration](https://github.com/AndreaF17/netbird-glinet-integration)
+Maintained by @me
 — bug reports and feature requests are welcome on the
 [issue tracker](https://github.com/AndreaF17/netbird-glinet-integration/issues).
 
