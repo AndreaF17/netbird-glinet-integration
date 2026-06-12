@@ -1,43 +1,55 @@
 name: build
 
 on:
+  # Release-driven: pushing a tag (git push origin v0.1) or publishing a
+  # GitHub Release for that tag builds the LATEST upstream netbird and
+  # attaches netbird_<netbird-ver>-<tag>_<arch>.ipk to the release.
   push:
     tags: ["v*"]
+  release:
+    types: [published]
+  # Manual test builds: artifact only, nothing is published.
   workflow_dispatch:
     inputs:
       netbird_version:
         description: "NetBird version to build (e.g. 0.72.3). Empty = latest release."
         required: false
         default: ""
-  schedule:
-    # Daily check for new netbird releases.
-    - cron: "23 5 * * *"
+      pkg_release:
+        description: "Package release suffix (e.g. 0.1). Empty = 1."
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
+# Creating a Release in the GitHub UI also pushes its tag, so both triggers
+# can fire for the same tag. Serialize them per tag; the steps are
+# idempotent (release create is guarded, uploads use --clobber).
+concurrency:
+  group: build-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  # Two version axes, deliberately decoupled:
-  #   - this repo's own tags (v0.1, v0.2, ...) version the integration;
-  #     pushing one builds the LATEST upstream netbird into that release.
-  #   - automated upstream tracking publishes under netbird-v<X.Y.Z> tags
-  #     (scheduled daily check, and manual dispatch with a version input).
   resolve:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.resolve.outputs.version }}
-      release_tag: ${{ steps.resolve.outputs.release_tag }}
-      proceed: ${{ steps.resolve.outputs.proceed }}
+      version: ${{ steps.resolve.outputs.version }}       # upstream netbird X.Y.Z
+      pkg_release: ${{ steps.resolve.outputs.pkg_release }} # tag without leading v
+      release_tag: ${{ steps.resolve.outputs.release_tag }} # v<pkg_release>, empty on dispatch
     steps:
-      - name: Resolve netbird version and release tag
+      - name: Resolve versions
         id: resolve
         env:
-          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           INPUT_VERSION: ${{ inputs.netbird_version }}
+          INPUT_PKG_RELEASE: ${{ inputs.pkg_release }}
           REF_NAME: ${{ github.ref_name }}
+          RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
           set -eu
+
+          # Upstream netbird version: dispatch input, else latest release.
           VER=""
           if [ "$EVENT" = "workflow_dispatch" ]; then
             VER="${INPUT_VERSION#v}"
@@ -49,26 +61,32 @@ jobs:
           [ -n "$VER" ] && [ "$VER" != "null" ]
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
-          if [ "$EVENT" = "push" ]; then
-            # Integration release: the pushed repo tag names the release.
-            RELEASE_TAG="$REF_NAME"
+          # Package release suffix and release tag from the trigger.
+          case "$EVENT" in
+            release)
+              TAG="$RELEASE_TAG_NAME" ;;
+            push)
+              TAG="$REF_NAME" ;;
+            *)
+              TAG="" ;;
+          esac
+          if [ -n "$TAG" ]; then
+            PKG_RELEASE="${TAG#v}"
+            RELEASE_TAG="$TAG"
           else
-            RELEASE_TAG="netbird-v$VER"
+            PKG_RELEASE="${INPUT_PKG_RELEASE:-1}"
+            RELEASE_TAG=""
           fi
+          # The suffix lands in an opkg version string and in a filename:
+          # keep it to a safe charset.
+          echo "$PKG_RELEASE" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z.+-]*$' \
+            || { echo "error: invalid tag/pkg_release '$PKG_RELEASE'" >&2; exit 1; }
+          echo "pkg_release=$PKG_RELEASE" >> "$GITHUB_OUTPUT"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-
-          # On the scheduled run, skip if this upstream version was already
-          # published by a previous scheduled/dispatch build.
-          PROCEED=true
-          if [ "$EVENT" = "schedule" ] && gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists, nothing to do."
-            PROCEED=false
-          fi
-          echo "proceed=$PROCEED" >> "$GITHUB_OUTPUT"
+          echo "Building netbird $VER as package release -$PKG_RELEASE (release tag: '${RELEASE_TAG:-none}')"
 
   build:
     needs: resolve
-    if: needs.resolve.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,6 +94,7 @@ jobs:
       - name: Build .ipk
         env:
           NETBIRD_VERSION: ${{ needs.resolve.outputs.version }}
+          PKG_RELEASE: ${{ needs.resolve.outputs.pkg_release }}
         run: ./build.sh
 
       - name: Checksums
@@ -87,24 +106,27 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: netbird-ipk-${{ needs.resolve.outputs.version }}
+          name: netbird-ipk-${{ needs.resolve.outputs.version }}-${{ needs.resolve.outputs.pkg_release }}
           path: |
             out/netbird_*.ipk
             out/sha256sums.txt
 
       - name: Publish release
-        # Integration tag pushes release under the pushed tag; scheduled and
-        # dispatched upstream builds release under netbird-v<X.Y.Z>.
+        # Only for tag-driven runs. Creates the release if the tag was
+        # pushed via git (no release yet); the UI release flow already
+        # created it, so the guard makes this idempotent either way.
+        if: needs.resolve.outputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
           VER: ${{ needs.resolve.outputs.version }}
+          PKG_RELEASE: ${{ needs.resolve.outputs.pkg_release }}
           TAG: ${{ needs.resolve.outputs.release_tag }}
         run: |
           set -eu
           if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
               --title "netbird $VER for GL.iNet GL-X2000 ($TAG)" \
-              --notes "Static NetBird client $VER packaged as .ipk for aarch64_cortex-a53_neon-vfpv4 (GL-X2000). Built from https://github.com/netbirdio/netbird/releases/tag/v$VER"
+              --notes "Static NetBird client $VER packaged as netbird_${VER}-${PKG_RELEASE} (.ipk, aarch64_cortex-a53_neon-vfpv4, GL-X2000). Built from https://github.com/netbirdio/netbird/releases/tag/v$VER"
           fi
           gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber \
             out/netbird_*.ipk out/sha256sums.txt

@@ -248,16 +248,21 @@ Maintained by [Andrea (@AndreaF17)](https://github.com/AndreaF17).
 
 ## CI
 
-`.github/workflows/build.yml`:
+`.github/workflows/build.yml` — release-driven, no scheduled builds. The
+repo tag versions the *integration*; the upstream netbird version is
+resolved to the latest release at build time. Tag `v0.1` + upstream
+`0.72.3` ⇒ asset `netbird_0.72.3-0.1_aarch64_cortex-a53_neon-vfpv4.ipk`
+(the tag, minus the `v`, becomes the opkg package-release suffix).
 
-- **Tag push** (`v0.1`, `v0.2`, … — this repo's own versions) → builds the
-  **latest** upstream netbird and publishes it as a GitHub release under
-  the pushed tag, with the `.ipk` + `sha256sums.txt`.
-- **Manual run** (`workflow_dispatch`) → optional `netbird_version` input
-  (empty = latest upstream); publishes under a `netbird-v<X.Y.Z>` tag.
-- **Daily schedule** → checks for a new upstream netbird release; if no
-  `netbird-v<X.Y.Z>` release exists here yet, builds and publishes it
-  automatically.
+- **Tag push** (`git tag v0.1 && git push origin v0.1`) → builds the
+  latest upstream netbird, creates GitHub release `v0.1`, attaches the
+  `.ipk` + `sha256sums.txt`.
+- **Release published from the GitHub UI** → same result; the workflow
+  detects the release's tag and uploads the assets to it. (Both triggers
+  can fire for one tag — runs are serialized per tag and idempotent.)
+- **Manual run** (`workflow_dispatch`) → test builds only: optional
+  `netbird_version` and `pkg_release` inputs, produces a workflow
+  artifact, publishes nothing.
 
 ## Repo layout
 

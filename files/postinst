@@ -16,13 +16,32 @@ rm -rf /tmp/netbird-runtime
 # fields; patch them from an existing Applications entry on this firmware
 # so the item lands in the right sidebar group regardless of GL version.
 MENU=/usr/share/oui/menu.d/netbird.json
-if [ -d /usr/share/oui/menu.d ] && [ -f "$MENU" ]; then
+MENU_DIR=/usr/share/oui/menu.d
+if [ -d "$MENU_DIR" ] && [ -f "$MENU" ]; then
     ref=""
-    # Prefer a known Applications-group sibling as the reference entry.
-    for view in tailscale zerotier ddns wgserver; do
-        ref="$(grep -l "\"view\": *\"$view\"" /usr/share/oui/menu.d/*.json 2>/dev/null | head -n1)"
-        [ -n "$ref" ] && break
+    # Strategy 1: a sibling whose FILE NAME identifies a known
+    # Applications-group app (view names inside vary across firmware:
+    # e.g. Tailscale's view is "tailscaleview", not "tailscale").
+    for name in tailscale zerotier adguardhome ddns plugins plug-ins \
+                network_storage nas esim; do
+        for f in "$MENU_DIR/$name.json" "$MENU_DIR/gl-$name.json"; do
+            if [ -f "$f" ] && [ "$f" != "$MENU" ]; then ref="$f"; break 2; fi
+        done
     done
+    # Strategy 2: any entry whose parent looks like the Applications group.
+    if [ -z "$ref" ]; then
+        ref="$(grep -li '"parent": *"app' "$MENU_DIR"/*.json 2>/dev/null \
+               | grep -v "/netbird.json$" | head -n1)"
+    fi
+    # Strategy 3: known Applications view names (incl. the *view variants).
+    if [ -z "$ref" ]; then
+        for view in tailscaleview tailscale zerotierview zerotier \
+                    adguardhome ddns; do
+            ref="$(grep -l "\"view\": *\"$view\"" "$MENU_DIR"/*.json 2>/dev/null \
+                   | grep -v "/netbird.json$" | head -n1)"
+            [ -n "$ref" ] && break
+        done
+    fi
     if [ -n "$ref" ] && [ "$ref" != "$MENU" ]; then
         parent="$(sed -n 's/.*"parent": *"\([^"]*\)".*/\1/p' "$ref" | head -n1)"
         picon="$(sed -n 's/.*"parent_icon": *"\([^"]*\)".*/\1/p' "$ref" | head -n1)"
