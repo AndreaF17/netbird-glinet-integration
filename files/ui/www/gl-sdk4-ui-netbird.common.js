@@ -73,6 +73,9 @@ module.exports = (function () {
     border: '1px solid #dcdfe6', borderRadius: '6px', fontSize: '13px',
     color: '#303133', background: '#fff', outline: 'none'
   };
+  var INPUT_DISABLED = Object.assign({}, INPUT, {
+    background: '#f5f6fa', color: '#a0a0a3', cursor: 'not-allowed'
+  });
 
   function disabled(style) {
     return Object.assign({}, style, { opacity: '0.45', cursor: 'not-allowed' });
@@ -94,6 +97,7 @@ module.exports = (function () {
         version: 'unknown',
         status: null,
         upInProgress: false,
+        sshEnabled: false,
         upLog: '',
         setupKey: '',
         mgmtUrl: '',
@@ -101,7 +105,11 @@ module.exports = (function () {
         msg: '',
         msgErr: false,
         timer: null,
-        logTimer: null
+        logTimer: null,
+        // collapsible sections; null = auto (Connection opens while
+        // disconnected, collapses once connected) until the user clicks.
+        connOpenUser: null,
+        peersOpen: false
       };
     },
 
@@ -133,6 +141,14 @@ module.exports = (function () {
           connected: g(p, 'connected') || 0,
           details: g(p, 'details') || []
         };
+      },
+      // Connect form is locked while connected (or while anything runs).
+      formLocked: function () {
+        return this.mgmtConnected || this.busy || this.upInProgress || !this.installed;
+      },
+      connOpen: function () {
+        if (this.connOpenUser !== null) return this.connOpenUser;
+        return !this.mgmtConnected;
       }
     },
 
@@ -153,6 +169,7 @@ module.exports = (function () {
           self.version = res.version || 'unknown';
           self.status = res.status || null;
           self.upInProgress = !!res.up_in_progress;
+          self.sshEnabled = !!res.ssh_enabled;
           self.loading = false;
           if (self.upInProgress) self.startLogPolling();
         }).catch(function () { self.loading = false; });
@@ -178,7 +195,7 @@ module.exports = (function () {
 
       connect: function () {
         var self = this;
-        if (self.busy || self.upInProgress) return;
+        if (self.formLocked) return;
         var key = (self.setupKey || '').trim();
         var url = (self.mgmtUrl || '').trim();
         if (key && !/^[A-Za-z0-9-]+$/.test(key)) {
@@ -215,6 +232,25 @@ module.exports = (function () {
           self.busy = false;
           self.setMsg(res.err_code ? (res.err_msg || 'Failed') : 'Disconnected.', !!res.err_code);
           setTimeout(self.fetchStatus, 1500);
+        }).catch(function (e) {
+          self.busy = false;
+          self.setMsg(String(e && e.message ? e.message : e), true);
+        });
+      },
+
+      toggleSsh: function () {
+        var self = this;
+        if (self.busy || self.upInProgress || !self.running || !self.mgmtConnected) return;
+        var target = !self.sshEnabled;
+        self.busy = true;
+        self.upLog = '';
+        self.setMsg((target ? 'Enabling' : 'Disabling') + ' SSH…', false);
+        callRpc('set_ssh', { enabled: target }).then(function (res) {
+          res = res || {};
+          self.busy = false;
+          if (res.err_code) { self.setMsg(res.err_msg || 'SSH change failed', true); return; }
+          self.upInProgress = true;
+          self.startLogPolling();
         }).catch(function (e) {
           self.busy = false;
           self.setMsg(String(e && e.message ? e.message : e), true);
@@ -264,6 +300,47 @@ module.exports = (function () {
         ];
       }
 
+      function makeToggle(on, isDisabled, onClick) {
+        return h('div', {
+          style: {
+            position: 'relative', display: 'inline-block', width: '36px',
+            height: '22px', borderRadius: '11px',
+            cursor: isDisabled ? 'not-allowed' : 'pointer',
+            background: on ? '#00c8b5' : '#a0a0a3',
+            opacity: isDisabled ? '0.5' : '1', transition: 'background 0.2s'
+          },
+          on: { click: function () { if (!isDisabled) onClick(); } }
+        }, [
+          h('div', {
+            style: {
+              position: 'absolute', width: '18px', height: '18px', borderRadius: '50%',
+              background: '#fff', top: '2px', left: on ? '16px' : '2px',
+              transition: 'left 0.2s'
+            }
+          })
+        ]);
+      }
+
+      // Collapsible card header: title + caret, click toggles.
+      function collapsibleHead(title, extra, open, onToggle) {
+        return h('div', {
+          style: Object.assign({}, HEAD, { cursor: 'pointer', userSelect: 'none' }),
+          on: { click: onToggle }
+        }, [
+          h('span', {}, title + (extra ? ' ' : '')),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, [
+            extra ? h('span', { style: { fontSize: '12px', fontWeight: '400', color: '#a0a0a3' } }, extra) : null,
+            h('span', {
+              style: {
+                display: 'inline-block', fontSize: '12px', color: '#a0a0a3',
+                transition: 'transform 0.15s',
+                transform: open ? 'rotate(90deg)' : 'rotate(0deg)'
+              }
+            }, '▸')
+          ])
+        ]);
+      }
+
       // ---- status card ----
       var daemonBtn = h('button', {
         style: self.busy ? disabled(BTN_PLAIN) : BTN_PLAIN,
@@ -271,23 +348,14 @@ module.exports = (function () {
         on: { click: function () { self.svc(self.running ? 'stop' : 'start'); } }
       }, self.running ? 'Stop' : 'Start');
 
-      var toggle = h('div', {
-        style: {
-          position: 'relative', display: 'inline-block', width: '36px',
-          height: '22px', borderRadius: '11px', cursor: self.busy ? 'not-allowed' : 'pointer',
-          background: self.enabled ? '#00c8b5' : '#a0a0a3',
-          opacity: self.busy ? '0.5' : '1', transition: 'background 0.2s'
-        },
-        on: { click: function () { if (!self.busy) self.svc(self.enabled ? 'disable' : 'enable'); } }
-      }, [
-        h('div', {
-          style: {
-            position: 'absolute', width: '18px', height: '18px', borderRadius: '50%',
-            background: '#fff', top: '2px', left: self.enabled ? '16px' : '2px',
-            transition: 'left 0.2s'
-          }
-        })
-      ]);
+      var bootToggle = makeToggle(self.enabled, self.busy, function () {
+        self.svc(self.enabled ? 'disable' : 'enable');
+      });
+
+      // SSH toggle: only meaningful while connected (the change is applied
+      // through `netbird up`, which needs a working management session).
+      var sshDisabled = self.busy || self.upInProgress || !self.running || !self.mgmtConnected;
+      var sshToggle = makeToggle(self.sshEnabled, sshDisabled, self.toggleSsh);
 
       var mgmtState = self.running && self.mgmtConnected ? dot('ok', 'Connected')
         : self.running ? dot('warn', self.upInProgress ? 'Connecting…' : 'Disconnected')
@@ -302,15 +370,14 @@ module.exports = (function () {
         row('Daemon', [].concat(
           dot(self.running ? 'ok' : 'err', self.running ? 'Running' : 'Stopped'),
           [daemonBtn])),
-        row('Start on boot', [toggle]),
+        row('Start on boot', [bootToggle]),
         row('Management connection', mgmtState),
+        row('Allow NetBird SSH access', [sshToggle]),
         row('NetBird IP', [h('span', {}, self.running ? self.nbIp : '-')]),
-        row('Hostname (FQDN)', [h('span', {}, self.running ? self.nbFqdn : '-')]),
-        row('Peers', [h('span', {},
-          self.running ? (self.peers.connected + ' / ' + self.peers.total + ' connected') : '-')])
+        row('Hostname (FQDN)', [h('span', {}, self.running ? self.nbFqdn : '-')])
       ]);
 
-      // ---- connect card ----
+      // ---- connection card (collapsible) ----
       var logChildren = null;
       if (self.upLog) {
         var parts = self.upLog.split(/(https?:\/\/[^\s]+)/g);
@@ -325,14 +392,18 @@ module.exports = (function () {
         });
       }
 
-      var connectCard = h('div', { style: CARD }, [
-        h('div', { style: HEAD }, [h('span', {}, 'Connection')]),
+      var connBody = !self.connOpen ? [] : [
         h('div', { style: { padding: '10px 18px' } }, [
           h('div', { style: { fontSize: '12px', color: '#606266', marginBottom: '6px' } },
             'Setup key (leave empty for browser SSO login)'),
           h('input', {
-            style: INPUT,
-            attrs: { type: 'password', placeholder: 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX', autocomplete: 'off' },
+            style: self.formLocked ? INPUT_DISABLED : INPUT,
+            attrs: {
+              type: 'password',
+              placeholder: 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX',
+              autocomplete: 'off',
+              disabled: self.formLocked
+            },
             domProps: { value: self.setupKey },
             on: { input: function (e) { self.setupKey = e.target.value; } }
           })
@@ -341,8 +412,13 @@ module.exports = (function () {
           h('div', { style: { fontSize: '12px', color: '#606266', marginBottom: '6px' } },
             'Management URL (leave empty for https://api.netbird.io)'),
           h('input', {
-            style: INPUT,
-            attrs: { type: 'text', placeholder: 'https://netbird.example.com', autocomplete: 'off' },
+            style: self.formLocked ? INPUT_DISABLED : INPUT,
+            attrs: {
+              type: 'text',
+              placeholder: 'https://netbird.example.com',
+              autocomplete: 'off',
+              disabled: self.formLocked
+            },
             domProps: { value: self.mgmtUrl },
             on: { input: function (e) { self.mgmtUrl = e.target.value; } }
           })
@@ -354,10 +430,10 @@ module.exports = (function () {
           }
         }, [
           h('button', {
-            style: (self.busy || self.upInProgress || !self.installed) ? disabled(BTN) : BTN,
-            attrs: { disabled: self.busy || self.upInProgress || !self.installed },
+            style: self.formLocked ? disabled(BTN) : BTN,
+            attrs: { disabled: self.formLocked },
             on: { click: self.connect }
-          }, self.upInProgress ? 'Connecting…' : 'Connect'),
+          }, self.upInProgress ? 'Working…' : 'Connect'),
           h('button', {
             style: (self.busy || !self.running || !self.mgmtConnected) ? disabled(BTN_DANGER) : BTN_DANGER,
             attrs: { disabled: self.busy || !self.running || !self.mgmtConnected },
@@ -367,7 +443,10 @@ module.exports = (function () {
             style: { fontSize: '12px', color: self.msgErr ? '#f56c6c' : '#00c8b5' }
           }, self.msg) : null
         ]),
-        h('div', {
+        self.mgmtConnected ? h('div', {
+          style: { fontSize: '12px', color: '#a0a0a3', padding: '0 18px 12px', lineHeight: '1.5' }
+        }, 'Connected — disconnect first to enroll with a different setup key or management server.')
+        : h('div', {
           style: { fontSize: '12px', color: '#a0a0a3', padding: '0 18px 12px', lineHeight: '1.5' }
         }, 'With a setup key the router enrolls headlessly. Without one, a login URL appears '
            + 'in the output below — open it in your browser to authorize this router.'),
@@ -379,41 +458,61 @@ module.exports = (function () {
             overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all'
           }
         }, logChildren) : null
-      ]);
+      ];
 
-      // ---- peers card ----
+      var connectCard = h('div', { style: CARD }, [
+        collapsibleHead('Connection',
+          self.mgmtConnected ? 'connected' : null,
+          self.connOpen,
+          function () { self.connOpenUser = !self.connOpen; })
+      ].concat(connBody));
+
+      // ---- peers card (collapsible) ----
       var peersCard = null;
-      if (self.running && self.peers.details.length > 0) {
-        var th = function (t) {
-          return h('th', {
-            style: {
-              textAlign: 'left', padding: '8px 18px', borderBottom: '1px solid #f5f5f5',
-              color: '#909399', fontSize: '11px', textTransform: 'uppercase', fontWeight: '400'
-            }
-          }, t);
-        };
-        var td = function (children) {
-          return h('td', {
-            style: {
-              textAlign: 'left', padding: '8px 18px', borderBottom: '1px solid #f5f5f5',
-              color: '#606266', fontSize: '12px'
-            }
-          }, children);
-        };
-        var rows = self.peers.details.map(function (p) {
-          var stx = String(g(p, 'status', 'connectionStatus') || '?');
-          var ok = stx.toLowerCase() === 'connected';
-          return h('tr', {}, [
-            td([g(p, 'fqdn', 'hostname') || '?']),
-            td([g(p, 'netbirdIp', 'netbirdIP', 'ip') || '?']),
-            td(dot(ok ? 'ok' : 'err', stx))
-          ]);
-        });
+      if (self.running) {
+        var peersExtra = self.peers.connected + ' / ' + self.peers.total + ' connected';
+        var peersBody = [];
+        if (self.peersOpen) {
+          if (self.peers.details.length === 0) {
+            peersBody = [h('div', {
+              style: { padding: '14px 18px', fontSize: '12px', color: '#a0a0a3' }
+            }, 'No peers in this network yet.')];
+          } else {
+            var th = function (t) {
+              return h('th', {
+                style: {
+                  textAlign: 'left', padding: '8px 18px', borderBottom: '1px solid #f5f5f5',
+                  color: '#909399', fontSize: '11px', textTransform: 'uppercase', fontWeight: '400'
+                }
+              }, t);
+            };
+            var td = function (children) {
+              return h('td', {
+                style: {
+                  textAlign: 'left', padding: '8px 18px', borderBottom: '1px solid #f5f5f5',
+                  color: '#606266', fontSize: '12px'
+                }
+              }, children);
+            };
+            var rows = self.peers.details.map(function (p) {
+              // Normalize: a peer is either Connected or Disconnected —
+              // netbird's transient states (Connecting…) read as down.
+              var ok = String(g(p, 'status', 'connectionStatus') || '')
+                .toLowerCase() === 'connected';
+              return h('tr', {}, [
+                td([g(p, 'fqdn', 'hostname') || '?']),
+                td([g(p, 'netbirdIp', 'netbirdIP', 'ip') || '?']),
+                td(dot(ok ? 'ok' : 'err', ok ? 'Connected' : 'Disconnected'))
+              ]);
+            });
+            peersBody = [h('table', { style: { width: '100%', borderCollapse: 'collapse' } },
+              [h('tr', {}, [th('Peer'), th('NetBird IP'), th('Status')])].concat(rows))];
+          }
+        }
         peersCard = h('div', { style: CARD }, [
-          h('div', { style: HEAD }, [h('span', {}, 'Peers')]),
-          h('table', { style: { width: '100%', borderCollapse: 'collapse' } },
-            [h('tr', {}, [th('Peer'), th('NetBird IP'), th('Status')])].concat(rows))
-        ]);
+          collapsibleHead('Peers', peersExtra, self.peersOpen,
+            function () { self.peersOpen = !self.peersOpen; })
+        ].concat(peersBody));
       }
 
       var banner = !self.installed ? h('div', {

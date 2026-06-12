@@ -98,6 +98,20 @@ local function netbird_status()
     return nil
 end
 
+-- Helper: is the embedded NetBird SSH server allowed? Read from the
+-- persistent client config — `netbird status --json` does not expose it.
+local function ssh_allowed()
+    local f = io.open("/etc/netbird/config.json", "r")
+    if not f then return false end
+    local data = f:read("*a")
+    f:close()
+    local ok, cfg = pcall(cjson.decode, data)
+    if ok and type(cfg) == "table" then
+        return cfg.ServerSSHAllowed == true
+    end
+    return false
+end
+
 -- Input validation. Values are passed to a shell command line, so the
 -- charset is strict: no quotes, spaces, semicolons, backticks, etc.
 local function valid_setup_key(s)
@@ -129,6 +143,7 @@ function M.get_status()
     res.running = daemon_running()
     res.version = get_version()
     res.up_in_progress = file_exists(UP_LOCK)
+    res.ssh_enabled = ssh_allowed()
 
     local status = netbird_status()
     if status then
@@ -183,6 +198,46 @@ function M.up(params)
     ngx.pipe.spawn({"sh", "-c", cmd})
 
     return { status = "up_started" }
+end
+
+--[[
+    @method-type: call
+    @method-name: set_ssh
+    @method-desc: Enable/disable the embedded NetBird SSH server. Runs
+                  `netbird up --allow-server-ssh[=false]` in the background
+                  (disable requires a down/up cycle per NetBird docs);
+                  progress lands in the same log as connect (get_up_log).
+                  The management server must permit SSH (peer setting /
+                  ACL), otherwise netbird reports "not permitted" in the log.
+
+    @in bool enabled  desired SSH server state
+--]]
+function M.set_ssh(params)
+    if not file_exists(BIN) then
+        return { err_code = -1, err_msg = "netbird binary not found" }
+    end
+    if not daemon_running() then
+        return { err_code = -2, err_msg = "NetBird daemon is not running" }
+    end
+    if file_exists(UP_LOCK) then
+        return { err_code = -3, err_msg = "Another operation is already in progress" }
+    end
+
+    local cmd
+    if params.enabled then
+        cmd = "timeout 90 " .. BIN .. " up --allow-server-ssh"
+    else
+        -- Per NetBird docs, disabling needs: netbird down && netbird up --allow-server-ssh=false
+        cmd = "timeout 15 " .. BIN .. " down; timeout 90 " .. BIN .. " up --allow-server-ssh=false"
+    end
+
+    local full = "touch " .. UP_LOCK .. "; "
+        .. "(" .. cmd .. " > " .. UP_LOG .. " 2>&1; "
+        .. "echo \"[exit code: $?]\" >> " .. UP_LOG .. "; "
+        .. "rm -f " .. UP_LOCK .. ") &"
+    ngx.pipe.spawn({"sh", "-c", full})
+
+    return { status = "ssh_started" }
 end
 
 --[[
