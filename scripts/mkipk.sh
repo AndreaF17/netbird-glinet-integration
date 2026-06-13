@@ -64,6 +64,14 @@ else
     install -m 0755 "$BIN" "$DATA/usr/sbin/netbird"
 fi
 install -m 0755 "$FILES_DIR/netbird.init" "$DATA/etc/init.d/netbird"
+
+# Panel self-updater: pulls the latest release from this repo, verifies the
+# sha256 and swaps the package in place. Installed regardless of binary layout
+# (the compressed-binary path above also uses /usr/libexec/netbird).
+mkdir -p "$DATA/usr/libexec/netbird"
+install -m 0755 "$FILES_DIR/netbird-self-update.sh" \
+    "$DATA/usr/libexec/netbird/netbird-self-update.sh"
+
 # /etc/netbird/config.json is generated at runtime by netbird itself and is
 # deliberately NOT shipped: opkg never deletes files it did not install, and
 # shipping an empty JSON file would break netbird's config parser.

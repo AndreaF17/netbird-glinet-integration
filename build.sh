@@ -1,11 +1,11 @@
 #!/bin/sh
-# One-shot build: docker image + static cross-compile + .ipk packaging.
+# One-shot build: docker image + fetch official netbird binary + .ipk packaging.
 # Everything runs inside Docker, so the only host requirement (macOS or
 # Linux, arm64 or amd64) is Docker itself.
 #
 # Usage:
-#   ./build.sh           # compile + package -> ./out/netbird_<ver>_<arch>.ipk
-#   ./build.sh binary    # compile only      -> ./out/netbird
+#   ./build.sh           # fetch + package -> ./out/netbird_<ver>_<arch>.ipk
+#   ./build.sh binary    # fetch binary only -> ./out/netbird
 #   ./build.sh package   # package only (binary must already be in ./out)
 #
 # Environment:
@@ -33,13 +33,11 @@ echo "==> Building netbird ${NETBIRD_VERSION} for ${OPENWRT_ARCH}"
 echo "==> Building docker image ${IMAGE}"
 docker build -q -t "$IMAGE" "$ROOT/docker" >/dev/null
 
-# Named volumes cache Go modules and build artifacts across runs.
 run_in_container() {
     docker run --rm \
         -v "$ROOT:/work" \
-        -v netbird-glx2000-gomod:/go/pkg/mod \
-        -v netbird-glx2000-gocache:/root/.cache/go-build \
         -e NETBIRD_VERSION="$NETBIRD_VERSION" \
+        -e NETBIRD_ASSET_ARCH="${NETBIRD_ASSET_ARCH:-linux_arm64}" \
         -e OPENWRT_ARCH="$OPENWRT_ARCH" \
         -e COMPRESS_BINARY="${COMPRESS_BINARY:-1}" \
         -e PKG_RELEASE="${PKG_RELEASE:-1}" \

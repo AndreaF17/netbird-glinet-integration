@@ -109,18 +109,31 @@ module.exports = (function () {
         // collapsible sections; null = auto (Connection opens while
         // disconnected, collapses once connected) until the user clicks.
         connOpenUser: null,
-        peersOpen: false
+        peersOpen: false,
+        // -- self-update (Software update card) --
+        updChecking: false,   // a check_update RPC is in flight
+        updChecked: false,    // at least one check has returned
+        updOk: false,         // last check reached GitHub
+        updAvailable: false,  // a newer package exists
+        updCurrent: '',       // installed package version (e.g. 0.72.3-1)
+        updLatest: '',        // latest published package version
+        updHtmlUrl: '',       // release page link
+        updating: false,      // an install is running
+        updLog: '',
+        updLogTimer: null
       };
     },
 
     created: function () {
       this.fetchStatus();
       this.timer = setInterval(this.fetchStatus, 4000);
+      this.checkUpdate();   // auto-check once on load; install stays manual
     },
 
     beforeDestroy: function () {
       if (this.timer) clearInterval(this.timer);
       if (this.logTimer) clearInterval(this.logTimer);
+      if (this.updLogTimer) clearInterval(this.updLogTimer);
     },
 
     computed: {
@@ -270,6 +283,71 @@ module.exports = (function () {
           self.busy = false;
           setTimeout(self.fetchStatus, 800);
         });
+      },
+
+      // -- self-update --------------------------------------------------------
+      checkUpdate: function () {
+        var self = this;
+        if (self.updChecking || self.updating) return;
+        self.updChecking = true;
+        callRpc('check_update', {}).then(function (res) {
+          res = res || {};
+          self.updChecking = false;
+          self.updChecked = true;
+          self.updOk = !!res.ok;
+          if (res.ok) {
+            self.updAvailable = !!res.update_available;
+            self.updCurrent = res.current || '';
+            self.updLatest = res.latest || '';
+            self.updHtmlUrl = res.html_url || '';
+          }
+        }).catch(function () {
+          self.updChecking = false;
+          self.updChecked = true;
+          self.updOk = false;
+        });
+      },
+
+      startUpdate: function () {
+        var self = this;
+        if (self.updating || !self.updAvailable) return;
+        self.updating = true;
+        self.updLog = '';
+        callRpc('do_update', {}).then(function (res) {
+          res = res || {};
+          if (res.err_code) {
+            self.updating = false;
+            self.setMsg(res.err_msg || 'Could not start update', true);
+            return;
+          }
+          self.startUpdateLogPolling();
+        }).catch(function (e) {
+          self.updating = false;
+          self.setMsg(String(e && e.message ? e.message : e), true);
+        });
+      },
+
+      startUpdateLogPolling: function () {
+        var self = this;
+        if (self.updLogTimer) return;
+        var poll = function () {
+          callRpc('get_update_log', {}).then(function (res) {
+            res = res || {};
+            if (res.log) self.updLog = String(res.log);
+            if (!res.in_progress) {
+              if (self.updLogTimer) { clearInterval(self.updLogTimer); self.updLogTimer = null; }
+              self.updating = false;
+              // Re-read installed version + re-check (the panel may reload as
+              // nginx restarts; this refreshes whatever survives).
+              self.fetchStatus();
+              self.checkUpdate();
+            }
+          }).catch(function () {
+            // nginx is briefly down during opkg install/postinst — keep polling.
+          });
+        };
+        poll();
+        self.updLogTimer = setInterval(poll, 2500);
       }
     },
 
@@ -376,6 +454,70 @@ module.exports = (function () {
         row('NetBird IP', [h('span', {}, self.running ? self.nbIp : '-')]),
         row('Hostname (FQDN)', [h('span', {}, self.running ? self.nbFqdn : '-')])
       ]);
+
+      // ---- software update card ----
+      // Only meaningful once the package is installed. Auto-checks on load;
+      // the install itself is always an explicit click.
+      var updateCard = null;
+      if (self.installed) {
+        var updRight;
+        if (self.updating) {
+          updRight = h('span', { style: { fontSize: '12px', color: '#5272f7' } }, 'Updating…');
+        } else if (!self.updChecked || self.updChecking) {
+          updRight = h('span', { style: { fontSize: '12px', color: '#a0a0a3' } }, 'Checking…');
+        } else if (!self.updOk) {
+          updRight = h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, [
+            h('span', { style: { fontSize: '12px', color: '#a0a0a3' } }, 'Check unavailable'),
+            h('button', { style: BTN_PLAIN, on: { click: self.checkUpdate } }, 'Retry')
+          ]);
+        } else if (self.updAvailable) {
+          updRight = h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } }, [
+            h('span', {
+              style: {
+                fontSize: '12px', fontWeight: '600', color: '#fff', background: '#00c8b5',
+                borderRadius: '10px', padding: '2px 10px'
+              }
+            }, 'v' + self.updLatest + ' available'),
+            self.updHtmlUrl ? h('a', {
+              attrs: { href: self.updHtmlUrl, target: '_blank', rel: 'noopener' },
+              style: { fontSize: '12px', color: '#5272f7' }
+            }, 'release notes') : null,
+            h('button', { style: BTN, on: { click: self.startUpdate } }, 'Update now')
+          ]);
+        } else {
+          updRight = h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, [
+            dot('ok', 'Up to date'),
+            h('button', { style: BTN_PLAIN, on: { click: self.checkUpdate } }, 'Check again')
+          ].reduce(function (a, b) { return a.concat(b); }, []));
+        }
+
+        var updChildren = [
+          h('div', { style: HEAD }, [
+            h('span', {}, 'Software update'),
+            updRight
+          ])
+        ];
+        // Current version line + live install log.
+        updChildren.push(row('Installed version',
+          [h('span', {}, self.updCurrent ? ('v' + self.updCurrent) : ('pkg v' + VERSION))]));
+        if (self.updating || self.updLog) {
+          updChildren.push(h('pre', {
+            style: {
+              margin: '0 18px 14px', padding: '10px 12px', background: '#1e1e24',
+              color: '#c9c9d1', fontFamily: 'monospace', fontSize: '11px',
+              lineHeight: '1.5', borderRadius: '6px', maxHeight: '220px',
+              overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all'
+            }
+          }, self.updLog || 'Starting…'));
+        }
+        if (self.updating) {
+          updChildren.push(h('div', {
+            style: { fontSize: '12px', color: '#a0a0a3', padding: '0 18px 14px', lineHeight: '1.5' }
+          }, 'Installing in the background. The admin panel may briefly reload while the web server '
+             + 'restarts — your NetBird enrollment is preserved.'));
+        }
+        updateCard = h('div', { style: CARD }, updChildren);
+      }
 
       // ---- connection card (collapsible) ----
       var logChildren = null;
@@ -526,6 +668,7 @@ module.exports = (function () {
       return h('div', { style: { padding: '16px', maxWidth: '760px', margin: '0 auto' } }, [
         banner,
         statusCard,
+        updateCard,
         connectCard,
         peersCard,
         h('div', { style: { textAlign: 'center', fontSize: '11px', color: '#ccc', marginTop: '8px' } },

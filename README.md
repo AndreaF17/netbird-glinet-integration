@@ -67,9 +67,11 @@ release: `make ipk PKG_RELEASE=2`. opkg upgrades `0.72.3-2` over `0.72.3-1`
 but **skips** installing the same version again ("up to date"), so without
 a bump a rebuilt same-version ipk never lands on the router.
 
-Other targets: `make build` (binary only), `make package` (re-package an
-existing binary), `make clean`. Go module/build caches persist in Docker
-named volumes, so rebuilds are fast.
+Other targets: `make build` (fetch binary only), `make package` (re-package
+an existing binary), `make clean`. The build fetches netbird's official
+prebuilt static `linux_arm64` binary (verified against the upstream
+`sha256sums`) rather than compiling from source — no Go toolchain, and the
+build is just a download + package.
 
 ## Installing on the router
 
@@ -102,7 +104,15 @@ netbird status
 
 ## Upgrading
 
-On the GL-X2000, **remove the old version first**:
+**Easiest: from the admin panel.** Applications → NetBird shows a *Software
+update* card that checks this repo's GitHub Releases on load. When a newer
+build exists, click **Update now** — the router downloads the `.ipk`, verifies
+its sha256, then swaps the package in place (remove-then-install, see below)
+and restarts the daemon. The update runs detached so it survives the web
+server restart and the brief tunnel teardown; your enrollment is preserved.
+Backed by `files/netbird-self-update.sh`.
+
+To upgrade manually instead, on the GL-X2000 **remove the old version first**:
 
 ```sh
 scp ./out/netbird_<newver>_*.ipk root@192.168.8.1:/tmp/
@@ -248,36 +258,56 @@ Maintained by [Andrea (@AndreaF17)](https://github.com/AndreaF17).
 
 ## CI
 
-`.github/workflows/build.yml` — release-driven, no scheduled builds. The
-repo tag versions the *integration*; the upstream netbird version is
-resolved to the latest release at build time. Tag `v0.1` + upstream
-`0.72.3` ⇒ asset `netbird_0.72.3-0.1_aarch64_cortex-a53_neon-vfpv4.ipk`
-(the tag, minus the `v`, becomes the opkg package-release suffix).
+The actual build steps live once in `.github/workflows/_build.yml` (a
+reusable `workflow_call`); two entry points drive it.
 
-- **Tag push** (`git tag v0.1 && git push origin v0.1`) → builds the
-  latest upstream netbird, creates GitHub release `v0.1`, attaches the
-  `.ipk` + `sha256sums.txt`.
-- **Release published from the GitHub UI** → same result; the workflow
-  detects the release's tag and uploads the assets to it. (Both triggers
-  can fire for one tag — runs are serialized per tag and idempotent.)
+**Automatic upstream tracking — `.github/workflows/watch-upstream.yml`.**
+Runs daily (06:00 UTC) and on demand. It polls netbird's latest release and,
+if that version has not been packaged yet, builds it and publishes a release
+tagged `netbird-v<version>` with package release `-1`. No manual versioning:
+a new netbird release becomes a new `.ipk` within a day, hands-off. Detection
+keys off whether the `netbird-v<version>` release already exists, so re-runs
+never double-build. On most days the check is a no-op (nothing new) and no
+build runs.
+
+**Manual / packaging-fix path — `.github/workflows/build.yml`.** For changes
+to the integration itself (init, panel UI, scripts) against the *same*
+netbird version. The repo tag versions the integration; upstream netbird
+resolves to the latest release at build time. Tag `v0.2` + upstream `0.72.3`
+⇒ asset `netbird_0.72.3-0.2_aarch64_cortex-a53_neon-vfpv4.ipk` (the tag,
+minus the `v`, becomes the opkg package-release suffix).
+
+- **Tag push** (`git tag v0.2 && git push origin v0.2`) → builds the latest
+  upstream netbird, creates release `v0.2`, attaches `.ipk` + `sha256sums.txt`.
+- **Release published from the GitHub UI** → same result. (Both triggers can
+  fire for one tag — runs are serialized per tag and idempotent.)
 - **Manual run** (`workflow_dispatch`) → test builds only: optional
-  `netbird_version` and `pkg_release` inputs, produces a workflow
-  artifact, publishes nothing.
+  `netbird_version` / `pkg_release` inputs, produces a workflow artifact,
+  publishes nothing.
+
+The build no longer compiles netbird from source: `scripts/compile.sh`
+downloads netbird's **official** prebuilt static `linux_arm64` binary and
+verifies it against the upstream `sha256sums`, then `mkipk.sh` wraps,
+compresses and packages it with the GL.iNet panel. Faster, and byte-for-byte
+the maintainers' build.
 
 ## Repo layout
 
 ```
 Makefile                     # make build | ipk | package | clean
-build.sh                     # one-shot: docker build + compile + package -> ./out/
-docker/Dockerfile            # build environment (golang:1.25-bookworm)
-scripts/compile.sh           # static Go cross-compile (runs in container)
+build.sh                     # one-shot: docker build + fetch + package -> ./out/
+docker/Dockerfile            # build environment (debian:bookworm-slim + curl)
+scripts/compile.sh           # fetch + verify official netbird binary (in container)
 scripts/mkipk.sh             # legacy-format ipk assembly (runs in container)
 files/netbird.init           # procd init script -> /etc/init.d/netbird
 files/netbird-wrapper.in     # /usr/sbin/netbird wrapper (compressed layout)
+files/netbird-self-update.sh # in-panel self-updater -> /usr/libexec/netbird/
 files/netbird.keep           # sysupgrade keep list -> /lib/upgrade/keep.d/netbird
 files/postinst, files/prerm, files/postrm  # opkg maintainer scripts
 files/ui/rpc/netbird         # GL admin panel: Lua RPC backend
 files/ui/menu/netbird.json   # GL admin panel: sidebar menu entry (oui menu.d)
 files/ui/www/gl-sdk4-ui-netbird.common.js  # GL admin panel: native OUI Vue 2 view
-.github/workflows/build.yml  # CI: tag / manual / scheduled builds + releases
+.github/workflows/_build.yml         # CI: reusable build+publish (workflow_call)
+.github/workflows/build.yml          # CI: tag / release / manual entry point
+.github/workflows/watch-upstream.yml # CI: daily upstream poll -> auto build
 ```

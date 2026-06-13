@@ -17,6 +17,12 @@ local BIN = "/usr/sbin/netbird"
 local INIT = "/etc/init.d/netbird"
 local UP_LOG = "/tmp/netbird-up.log"
 local UP_LOCK = "/tmp/netbird-up.lock"
+-- Self-update (panel "Software update" card). The heavy lifting lives in a
+-- shipped shell script so the download/verify/opkg logic stays testable and
+-- out of the request worker; see files/netbird-self-update.sh.
+local SELF_UPDATE = "/usr/libexec/netbird/netbird-self-update.sh"
+local UPD_LOG = "/tmp/netbird-update.log"
+local UPD_LOCK = "/tmp/netbird-update.lock"
 
 -- Cached version. Invalidated per-worker when the netbird binary mtime
 -- changes (e.g. after a package upgrade). Each nginx worker holds its own
@@ -315,6 +321,85 @@ end
 function M.get_log()
     local data = exec("logread 2>/dev/null | grep -i netbird | tail -n 50")
     return { log = data or "" }
+end
+
+--[[
+    @method-type: call
+    @method-name: check_update
+    @method-desc: Check this repo's GitHub Releases for a newer package and
+                  report whether an update is available. No side effects; the
+                  result is cached for 30 min by the shipped script so frequent
+                  panel loads do not hammer the GitHub API.
+
+    @out bool   ok                check succeeded (network reachable)
+    @out string current           installed package version (e.g. 0.72.3-1)
+    @out string latest            latest published package version
+    @out bool   update_available  latest is newer than installed
+    @out string name              latest .ipk filename
+    @out string url               latest .ipk download URL
+    @out string html_url          GitHub release page
+    @out string ?error            present when ok=false
+--]]
+function M.check_update()
+    if not file_exists(SELF_UPDATE) then
+        return { ok = false, error = "updater not installed" }
+    end
+    -- Generous timeout: a cold check makes two small HTTPS calls.
+    local out = exec("timeout 25 sh " .. SELF_UPDATE .. " check 2>/dev/null")
+    if out and #out > 0 then
+        local ok, r = pcall(cjson.decode, out)
+        if ok and type(r) == "table" then return r end
+    end
+    return { ok = false, error = "update check failed" }
+end
+
+--[[
+    @method-type: call
+    @method-name: do_update
+    @method-desc: Download, checksum-verify and install the latest release.
+                  Runs fully detached (setsid) so it survives the nginx and
+                  netbird restarts that opkg's postinst triggers — and the
+                  tunnel teardown on `opkg remove`. Progress is written to the
+                  update log; poll get_update_log for it.
+--]]
+function M.do_update()
+    if not file_exists(SELF_UPDATE) then
+        return { err_code = -1, err_msg = "updater script not installed" }
+    end
+    if file_exists(UPD_LOCK) then
+        return { err_code = -2, err_msg = "An update is already in progress" }
+    end
+    -- The runner clears the lock when finished. setsid detaches it into its own
+    -- session so a `kill $(pgrep nginx)` in postinst cannot reach it; nohup is
+    -- the fallback on the rare build without setsid.
+    local runner = "sh " .. SELF_UPDATE .. " run; rm -f " .. UPD_LOCK
+    local full = "touch " .. UPD_LOCK .. "; "
+        .. "if command -v setsid >/dev/null 2>&1; then "
+        .. "setsid sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & "
+        .. "else nohup sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & fi"
+    ngx.pipe.spawn({"sh", "-c", full})
+    return { status = "update_started" }
+end
+
+--[[
+    @method-type: call
+    @method-name: get_update_log
+    @method-desc: Tail of the self-update progress log.
+
+    @out string log          last 8KB of the update log
+    @out bool   in_progress  an update is still running
+--]]
+function M.get_update_log()
+    local res = { log = "", in_progress = file_exists(UPD_LOCK) }
+    local f = io.open(UPD_LOG, "r")
+    if f then
+        local size = f:seek("end")
+        local from = size > 8192 and size - 8192 or 0
+        f:seek("set", from)
+        res.log = f:read("*a") or ""
+        f:close()
+    end
+    return res
 end
 
 return M
