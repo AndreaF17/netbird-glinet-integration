@@ -1,0 +1,76 @@
+# Reusable build: compile the static netbird binary, package the .ipk, and
+# (optionally) publish a GitHub Release with the artifacts attached.
+#
+# This is the single source of truth for the build steps. It is called by:
+#   - build.yml          (tag / release / manual, derives versions from the event)
+#   - watch-upstream.yml (daily poll of upstream netbird, fully automatic)
+#
+# Pass release_tag="" to produce artifacts only (no Release is published).
+name: _build
+
+on:
+  workflow_call:
+    inputs:
+      netbird_version:
+        description: "Upstream netbird version to build, e.g. 0.72.3 (no leading v)."
+        required: true
+        type: string
+      pkg_release:
+        description: "Package release suffix (opkg). Bump for packaging-only changes."
+        required: false
+        type: string
+        default: "1"
+      release_tag:
+        description: "Tag to publish the Release under. Empty = artifact only."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .ipk
+        env:
+          NETBIRD_VERSION: ${{ inputs.netbird_version }}
+          PKG_RELEASE: ${{ inputs.pkg_release }}
+        run: ./build.sh
+
+      - name: Checksums
+        run: |
+          cd out
+          sha256sum netbird_*.ipk > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: netbird-ipk-${{ inputs.netbird_version }}-${{ inputs.pkg_release }}
+          path: |
+            out/netbird_*.ipk
+            out/sha256sums.txt
+
+      - name: Publish release
+        # Tag-driven runs only. Creating the release also creates the tag (for
+        # the upstream watcher), and is guarded + idempotent so a UI-created
+        # release or a re-run just clobbers the uploaded assets.
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ inputs.netbird_version }}
+          PKG_RELEASE: ${{ inputs.pkg_release }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -eu
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+              --title "netbird $VER for GL.iNet GL-X2000 ($TAG)" \
+              --notes "Static NetBird client $VER packaged as netbird_${VER}-${PKG_RELEASE} (.ipk, aarch64_cortex-a53_neon-vfpv4, GL-X2000). Built from https://github.com/netbirdio/netbird/releases/tag/v$VER"
+          fi
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber \
+            out/netbird_*.ipk out/sha256sums.txt

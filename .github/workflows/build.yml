@@ -87,46 +87,10 @@ jobs:
 
   build:
     needs: resolve
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build .ipk
-        env:
-          NETBIRD_VERSION: ${{ needs.resolve.outputs.version }}
-          PKG_RELEASE: ${{ needs.resolve.outputs.pkg_release }}
-        run: ./build.sh
-
-      - name: Checksums
-        run: |
-          cd out
-          sha256sum netbird_*.ipk > sha256sums.txt
-          cat sha256sums.txt
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: netbird-ipk-${{ needs.resolve.outputs.version }}-${{ needs.resolve.outputs.pkg_release }}
-          path: |
-            out/netbird_*.ipk
-            out/sha256sums.txt
-
-      - name: Publish release
-        # Only for tag-driven runs. Creates the release if the tag was
-        # pushed via git (no release yet); the UI release flow already
-        # created it, so the guard makes this idempotent either way.
-        if: needs.resolve.outputs.release_tag != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VER: ${{ needs.resolve.outputs.version }}
-          PKG_RELEASE: ${{ needs.resolve.outputs.pkg_release }}
-          TAG: ${{ needs.resolve.outputs.release_tag }}
-        run: |
-          set -eu
-          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
-              --title "netbird $VER for GL.iNet GL-X2000 ($TAG)" \
-              --notes "Static NetBird client $VER packaged as netbird_${VER}-${PKG_RELEASE} (.ipk, aarch64_cortex-a53_neon-vfpv4, GL-X2000). Built from https://github.com/netbirdio/netbird/releases/tag/v$VER"
-          fi
-          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber \
-            out/netbird_*.ipk out/sha256sums.txt
+    permissions:
+      contents: write
+    uses: ./.github/workflows/_build.yml
+    with:
+      netbird_version: ${{ needs.resolve.outputs.version }}
+      pkg_release: ${{ needs.resolve.outputs.pkg_release }}
+      release_tag: ${{ needs.resolve.outputs.release_tag }}

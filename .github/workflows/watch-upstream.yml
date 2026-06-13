@@ -1,0 +1,59 @@
+name: watch-upstream
+
+# Fully automatic upstream tracking. Once a day this polls the latest netbird
+# release; if it is one we have not packaged yet, it builds it and publishes a
+# Release tagged netbird-v<version> with pkg_release 1. No manual versioning.
+#
+# Detection is idempotent: it keys off whether a netbird-v<version> Release
+# already exists, so re-runs and catch-up runs never double-build.
+on:
+  schedule:
+    # 06:00 UTC daily. GitHub may delay scheduled runs under load.
+    - cron: "0 6 * * *"
+  # Allow an on-demand check from the Actions tab.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watch-upstream
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Check for a new netbird release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          VER="$(curl -fsSL https://api.github.com/repos/netbirdio/netbird/releases/latest \
+            | jq -r '.tag_name | ltrimstr("v")')"
+          [ -n "$VER" ] && [ "$VER" != "null" ]
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+          TAG="netbird-v$VER"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "netbird $VER already packaged ($TAG); nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New upstream netbird $VER detected; will build and publish $TAG."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/_build.yml
+    with:
+      netbird_version: ${{ needs.check.outputs.version }}
+      pkg_release: "1"
+      release_tag: netbird-v${{ needs.check.outputs.version }}
