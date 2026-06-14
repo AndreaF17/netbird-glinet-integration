@@ -1,14 +1,18 @@
 #!/bin/sh
-# The netbird binary ships gzip-compressed because the GL-X2000's flash is
-# too small for the ~36 MB uncompressed binary. It is decompressed once into
-# RAM-backed /tmp and reused for every invocation; the version-suffixed
-# filename makes upgrades re-extract automatically. @VERSION@ is substituted
-# by scripts/mkipk.sh at package time.
+# The netbird binary ships gzip-compressed because the GL-X2000's flash is too
+# small for the ~36 MB uncompressed binary. It is decompressed once into
+# RAM-backed /tmp and reused for every invocation.
+#
+# The panel's self-updater replaces /usr/libexec/netbird/netbird.gz directly
+# from netbirdio/netbird releases and clears RUNTIME_DIR, so the next start
+# re-extracts the new binary. The "-nt" guard re-extracts even if only the .gz
+# changed (e.g. a manual swap), so a direct binary update never needs a reboot.
+# @VERSION@ (the integration package version) is substituted by mkipk.sh.
 BIN_GZ=/usr/libexec/netbird/netbird.gz
 RUNTIME_DIR=/tmp/netbird-runtime
-BIN="$RUNTIME_DIR/netbird-@VERSION@"
+BIN="$RUNTIME_DIR/netbird"
 
-if [ ! -x "$BIN" ]; then
+if [ ! -x "$BIN" ] || [ "$BIN_GZ" -nt "$BIN" ]; then
 	mkdir -p "$RUNTIME_DIR"
 	TMP="$BIN.$$.tmp"
 	if ! gunzip -c "$BIN_GZ" > "$TMP"; then

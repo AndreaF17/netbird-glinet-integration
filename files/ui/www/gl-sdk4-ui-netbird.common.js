@@ -493,13 +493,13 @@ module.exports = (function () {
 
         var updChildren = [
           h('div', { style: HEAD }, [
-            h('span', {}, 'Software update'),
+            h('span', {}, 'NetBird update'),
             updRight
           ])
         ];
-        // Current version line + live install log.
-        updChildren.push(row('Installed version',
-          [h('span', {}, self.updCurrent ? ('v' + self.updCurrent) : ('pkg v' + VERSION))]));
+        // Installed netbird version (pulled directly from netbird's releases).
+        updChildren.push(row('Installed netbird',
+          [h('span', {}, self.updCurrent ? ('v' + self.updCurrent) : (self.version || 'unknown'))]));
         if (self.updating || self.updLog) {
           updChildren.push(h('pre', {
             style: {
@@ -513,8 +513,8 @@ module.exports = (function () {
         if (self.updating) {
           updChildren.push(h('div', {
             style: { fontSize: '12px', color: '#a0a0a3', padding: '0 18px 14px', lineHeight: '1.5' }
-          }, 'Installing in the background. The admin panel may briefly reload while the web server '
-             + 'restarts — your NetBird enrollment is preserved.'));
+          }, 'Downloading the official netbird binary and swapping it in. The daemon restarts and '
+             + 'reconnects automatically — your enrollment is preserved.'));
         }
         updateCard = h('div', { style: CARD }, updChildren);
       }

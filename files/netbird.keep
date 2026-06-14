@@ -20,9 +20,12 @@
 
 # Binary: wrapper + gzipped payload (default layout), or the plain binary
 # at /usr/sbin/netbird when built with COMPRESS_BINARY=0 (netbird.gz then
-# simply doesn't exist and is skipped).
+# simply doesn't exist and is skipped). netbird.version records the binary
+# version the panel currently runs (updated in place by the self-updater), so
+# it travels with the binary across a firmware upgrade.
 /usr/sbin/netbird
 /usr/libexec/netbird/netbird.gz
+/usr/libexec/netbird/netbird.version
 
 # This list itself, so persistence survives the next upgrade too.
 /lib/upgrade/keep.d/netbird

@@ -65,12 +65,18 @@ else
 fi
 install -m 0755 "$FILES_DIR/netbird.init" "$DATA/etc/init.d/netbird"
 
-# Panel self-updater: pulls the latest release from this repo, verifies the
-# sha256 and swaps the package in place. Installed regardless of binary layout
-# (the compressed-binary path above also uses /usr/libexec/netbird).
+# Panel self-updater: pulls the OFFICIAL netbird binary directly from
+# netbirdio/netbird releases, verifies the sha256 and swaps it under the
+# wrapper — no .ipk, no opkg. Installed regardless of binary layout.
 mkdir -p "$DATA/usr/libexec/netbird"
 install -m 0755 "$FILES_DIR/netbird-self-update.sh" \
     "$DATA/usr/libexec/netbird/netbird-self-update.sh"
+
+# Record the bundled netbird version so the panel shows it before any direct
+# update, and so the updater compares against the running binary without paying
+# the cost of decompressing it just to read `netbird version`. The self-updater
+# overwrites this file after each direct binary swap.
+printf '%s\n' "$VER" > "$DATA/usr/libexec/netbird/netbird.version"
 
 # /etc/netbird/config.json is generated at runtime by netbird itself and is
 # deliberately NOT shipped: opkg never deletes files it did not install, and

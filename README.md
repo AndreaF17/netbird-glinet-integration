@@ -104,15 +104,22 @@ netbird status
 
 ## Upgrading
 
-**Easiest: from the admin panel.** Applications → NetBird shows a *Software
-update* card that checks this repo's GitHub Releases on load. When a newer
-build exists, click **Update now** — the router downloads the `.ipk`, verifies
-its sha256, then swaps the package in place (remove-then-install, see below)
-and restarts the daemon. The update runs detached so it survives the web
-server restart and the brief tunnel teardown; your enrollment is preserved.
-Backed by `files/netbird-self-update.sh`.
+**Easiest: from the admin panel.** Applications → NetBird shows a *NetBird
+update* card that checks **netbird's own GitHub releases** on load. When a
+newer netbird exists, click **Update now** — the router downloads netbird's
+official `linux_arm64` binary straight from `netbirdio/netbird`, verifies it
+against netbird's `sha256sums`, gzips it onto flash (replacing
+`/usr/libexec/netbird/netbird.gz`) and restarts the daemon, which reconnects
+automatically. No package, no opkg, no rebuild — the netbird binary is updated
+directly and independently of this integration package. Backed by
+`files/netbird-self-update.sh`; the running version is tracked in
+`/usr/libexec/netbird/netbird.version`.
 
-To upgrade manually instead, on the GL-X2000 **remove the old version first**:
+This means you only ever rebuild/reinstall the `.ipk` when the **panel itself**
+changes — netbird version bumps are handled entirely by the in-panel updater.
+
+To update netbird manually instead, on the GL-X2000 **remove the old version
+first**:
 
 ```sh
 scp ./out/netbird_<newver>_*.ipk root@192.168.8.1:/tmp/
@@ -258,38 +265,32 @@ Maintained by [Andrea (@AndreaF17)](https://github.com/AndreaF17).
 
 ## CI
 
-The actual build steps live once in `.github/workflows/_build.yml` (a
-reusable `workflow_call`); two entry points drive it.
+CI builds the **integration package only** — the GL.iNet panel, wrapper, init
+script and self-updater, plus a current netbird binary so a fresh install works
+immediately. You rebuild only when the *panel* changes; netbird version bumps
+are handled on-device by the in-panel updater (see [Upgrading](#upgrading)), so
+there is no scheduled/automatic build.
 
-**Automatic upstream tracking — `.github/workflows/watch-upstream.yml`.**
-Runs daily (06:00 UTC) and on demand. It polls netbird's latest release and,
-if that version has not been packaged yet, builds it and publishes a release
-tagged `netbird-v<version>` with package release `-1`. No manual versioning:
-a new netbird release becomes a new `.ipk` within a day, hands-off. Detection
-keys off whether the `netbird-v<version>` release already exists, so re-runs
-never double-build. On most days the check is a no-op (nothing new) and no
-build runs.
+The build steps live once in `.github/workflows/_build.yml` (a reusable
+`workflow_call`), driven by `.github/workflows/build.yml`. The repo tag versions
+the integration; netbird resolves to its latest release at build time. Tag
+`v0.2` + netbird `0.72.3` ⇒ asset
+`netbird_0.72.3-0.2_aarch64_cortex-a53_neon-vfpv4.ipk` (the tag, minus the `v`,
+is the opkg package-release suffix).
 
-**Manual / packaging-fix path — `.github/workflows/build.yml`.** For changes
-to the integration itself (init, panel UI, scripts) against the *same*
-netbird version. The repo tag versions the integration; upstream netbird
-resolves to the latest release at build time. Tag `v0.2` + upstream `0.72.3`
-⇒ asset `netbird_0.72.3-0.2_aarch64_cortex-a53_neon-vfpv4.ipk` (the tag,
-minus the `v`, becomes the opkg package-release suffix).
-
-- **Tag push** (`git tag v0.2 && git push origin v0.2`) → builds the latest
-  upstream netbird, creates release `v0.2`, attaches `.ipk` + `sha256sums.txt`.
+- **Tag push** (`git tag v0.2 && git push origin v0.2`) → builds, creates
+  release `v0.2`, attaches `.ipk` + `sha256sums.txt`.
 - **Release published from the GitHub UI** → same result. (Both triggers can
   fire for one tag — runs are serialized per tag and idempotent.)
 - **Manual run** (`workflow_dispatch`) → test builds only: optional
   `netbird_version` / `pkg_release` inputs, produces a workflow artifact,
   publishes nothing.
 
-The build no longer compiles netbird from source: `scripts/compile.sh`
-downloads netbird's **official** prebuilt static `linux_arm64` binary and
-verifies it against the upstream `sha256sums`, then `mkipk.sh` wraps,
-compresses and packages it with the GL.iNet panel. Faster, and byte-for-byte
-the maintainers' build.
+The build does not compile netbird from source: `scripts/compile.sh` downloads
+netbird's **official** prebuilt static `linux_arm64` binary and verifies it
+against the upstream `sha256sums`, then `mkipk.sh` wraps, compresses and
+packages it with the GL.iNet panel — byte-for-byte the maintainers' build, and
+the same artifact the on-device updater later pulls.
 
 ## Repo layout
 
@@ -301,13 +302,12 @@ scripts/compile.sh           # fetch + verify official netbird binary (in contai
 scripts/mkipk.sh             # legacy-format ipk assembly (runs in container)
 files/netbird.init           # procd init script -> /etc/init.d/netbird
 files/netbird-wrapper.in     # /usr/sbin/netbird wrapper (compressed layout)
-files/netbird-self-update.sh # in-panel self-updater -> /usr/libexec/netbird/
+files/netbird-self-update.sh # in-panel updater: netbird binary direct from upstream
 files/netbird.keep           # sysupgrade keep list -> /lib/upgrade/keep.d/netbird
 files/postinst, files/prerm, files/postrm  # opkg maintainer scripts
 files/ui/rpc/netbird         # GL admin panel: Lua RPC backend
 files/ui/menu/netbird.json   # GL admin panel: sidebar menu entry (oui menu.d)
 files/ui/www/gl-sdk4-ui-netbird.common.js  # GL admin panel: native OUI Vue 2 view
-.github/workflows/_build.yml         # CI: reusable build+publish (workflow_call)
-.github/workflows/build.yml          # CI: tag / release / manual entry point
-.github/workflows/watch-upstream.yml # CI: daily upstream poll -> auto build
+.github/workflows/_build.yml # CI: reusable build+publish (workflow_call)
+.github/workflows/build.yml  # CI: tag / release / manual entry point (panel package)
 ```
