@@ -37,41 +37,39 @@ present in netbird 0.72.3).
 ## Requirements
 
 - **Build host (your Mac or CI):** Docker. Nothing else — no Go toolchain.
+  The build only assembles the panel package; it does not fetch or compile
+  netbird.
+- **Router internet at install:** the netbird client is downloaded from the
+  official netbird releases during install. If the router is offline at
+  install time the package still installs — use the panel's *NetBird update*
+  card to download netbird once it's online.
 - **Router flash:** ~14 MB free overlay. The GL-X2000 has 128 MB flash with
-  only ~24 MB free, which cannot hold the ~36 MB static binary — so by
-  default the package ships the binary gzip-compressed (~13 MB on flash)
-  and a small `/usr/sbin/netbird` wrapper extracts it to RAM-backed `/tmp`
-  on first use after each boot. Check free space with `df -h /overlay`.
+  only ~24 MB free, which cannot hold the ~36 MB netbird binary — so it is
+  stored gzip-compressed (~13 MB on flash) at `/usr/libexec/netbird/netbird.gz`
+  and a small `/usr/sbin/netbird` wrapper extracts it to RAM-backed `/tmp` on
+  first use after each boot. Check free space with `df -h /overlay`.
 - **Router RAM:** ~36 MB of `/tmp` (tmpfs) for the extracted binary while
   netbird is installed, plus netbird's own working memory. Check `free`.
-- Build with `COMPRESS_BINARY=0` to get the classic layout (plain binary at
-  `/usr/sbin/netbird`, ~36 MB on flash, no RAM overhead) for devices with
-  more flash. UPX is deliberately not used — it's unreliable on arm64,
-  slows startup, and ends up in RAM anyway, so the gzip-to-tmpfs scheme
-  strictly dominates it.
 
 ## Building (macOS or Linux)
 
+The package contains the **integration only** — the GL panel, the
+`/usr/sbin/netbird` wrapper, the init script and the self-updater. No netbird
+binary is bundled; the router downloads it at install. So you version the
+*integration*, and rebuild only when the panel changes.
+
 ```sh
-./build.sh                          # latest netbird release
-NETBIRD_VERSION=0.72.3 ./build.sh   # pinned version
+./build.sh                          # -> ./out/netbird_1.0_<arch>.ipk
+INTEGRATION_VERSION=1.1 ./build.sh  # set the panel version
 # or via make:
 make ipk
-make ipk NETBIRD_VERSION=0.72.3
+make ipk INTEGRATION_VERSION=1.1
 ```
 
-Output: `./out/netbird_<version>-<release>_aarch64_cortex-a53_neon-vfpv4.ipk`
-
-For packaging-only changes (init script, panel UI, scripts) bump the
-release: `make ipk PKG_RELEASE=2`. opkg upgrades `0.72.3-2` over `0.72.3-1`
-but **skips** installing the same version again ("up to date"), so without
-a bump a rebuilt same-version ipk never lands on the router.
-
-Other targets: `make build` (fetch binary only), `make package` (re-package
-an existing binary), `make clean`. The build fetches netbird's official
-prebuilt static `linux_arm64` binary (verified against the upstream
-`sha256sums`) rather than compiling from source — no Go toolchain, and the
-build is just a download + package.
+Output: `./out/netbird_<version>_aarch64_cortex-a53_neon-vfpv4.ipk`. Bump
+`INTEGRATION_VERSION` for each panel change so opkg sees the new package as
+newer and upgrades instead of reporting "up to date". `make clean` removes
+`./out`.
 
 ## Installing on the router
 
@@ -84,14 +82,15 @@ opkg update || true
 opkg install /tmp/netbird_*.ipk
 ```
 
-The package installs `/usr/sbin/netbird` (a wrapper that extracts the
-gzipped binary from `/usr/libexec/netbird/netbird.gz` to `/tmp` on first
-use) and a procd init script at `/etc/init.d/netbird` (config in
+The package installs `/usr/sbin/netbird` (a wrapper that extracts the gzipped
+binary from `/usr/libexec/netbird/netbird.gz` to `/tmp` on first use), the
+self-updater, and a procd init script at `/etc/init.d/netbird` (config in
 `/etc/netbird`, runtime state in `/var/lib/netbird` — volatile by design to
-spare flash; the device identity lives in the persistent config).
-`postinst` enables and starts the service automatically. The first
-`netbird` invocation after each boot takes a few extra seconds while the
-binary is decompressed.
+spare flash; the device identity lives in the persistent config). During
+install, `postinst` downloads the official netbird client (verified against
+netbird's `sha256sums`) into `/usr/libexec/netbird/netbird.gz`, then enables
+and starts the service. The first `netbird` invocation after each boot takes a
+few extra seconds while the binary is decompressed.
 
 Then enroll the device:
 
@@ -118,26 +117,29 @@ directly and independently of this integration package. Backed by
 This means you only ever rebuild/reinstall the `.ipk` when the **panel itself**
 changes — netbird version bumps are handled entirely by the in-panel updater.
 
-To update netbird manually instead, on the GL-X2000 **remove the old version
-first**:
+To update netbird manually instead of via the panel, run the updater on the
+router (same script the panel calls):
+
+```sh
+ssh root@192.168.8.1 "sh /usr/libexec/netbird/netbird-self-update.sh run; \
+  cat /tmp/netbird-update.log"
+```
+
+**Updating the panel** (rare — only when this integration changes) is a normal
+opkg upgrade of a new `.ipk`. Because the package no longer carries the netbird
+binary it's tiny, so the old "remove first / Only have NNNNkb" flash dance no
+longer applies — a straight `opkg install` of a newer `INTEGRATION_VERSION`
+upgrades in place:
 
 ```sh
 scp ./out/netbird_<newver>_*.ipk root@192.168.8.1:/tmp/
-ssh root@192.168.8.1 "opkg remove netbird && opkg install /tmp/netbird_<newver>_*.ipk"
+ssh root@192.168.8.1 "opkg install /tmp/netbird_<newver>_*.ipk"
 ```
 
-A direct `opkg install` of the new ipk fails with *"Only have NNNNkb
-available on filesystem /overlay"*: opkg demands the new package's full
-~13 MB while the old copy still occupies its ~13 MB, and it does not credit
-the space freed by replacing it — two copies never fit in the ~24 MB
-overlay. Removing first sidesteps this. (`--force-space` skips the check
-but risks a half-written install if space truly runs out.)
-
-`/etc/netbird/config.json` is generated at runtime and never shipped in the
-package, so opkg leaves it alone on remove/upgrade — your enrollment
-survives and the daemon reconnects automatically after install. (It is
-deliberately not listed as a conffile: opkg errors trying to checksum a
-conffile that isn't installed yet.)
+The downloaded netbird binary (`/usr/libexec/netbird/netbird.gz`) and
+`/etc/netbird/config.json` are not owned by the package, so opkg leaves them
+alone across a panel upgrade — your netbird version and enrollment both
+survive, and the daemon reconnects automatically.
 
 ## Firmware upgrades (sysupgrade)
 
@@ -153,9 +155,10 @@ The list keeps the **full runtime**, not just the config:
 - `/etc/netbird/` — enrollment config / device identity (`config.json`)
 - `/etc/init.d/netbird` + the `/etc/rc.d/S99netbird` / `K10netbird`
   symlinks, so the service autostarts on first boot after the flash
-- `/usr/sbin/netbird` (wrapper) and `/usr/libexec/netbird/netbird.gz`
-  (gzipped binary; with `COMPRESS_BINARY=0` builds the plain binary is
-  `/usr/sbin/netbird` and the missing `.gz` path is skipped)
+- `/usr/sbin/netbird` (wrapper), `/usr/libexec/netbird/netbird.gz` (the
+  downloaded gzipped binary) and `/usr/libexec/netbird/netbird.version` (the
+  netbird version that binary is), so the netbird version installed via the
+  panel travels across the flash
 - the keep list itself, so persistence survives the *next* upgrade too
 
 So netbird reconnects right after a "keep settings" firmware flash, with
@@ -206,10 +209,9 @@ netbird status -d            # detailed peer/connection state
 ```
 
 **Not enough space**
-The default package needs ~14 MB of overlay (`df -h /overlay`) and ~36 MB
-of RAM in `/tmp` (`free`). If `/tmp` fills up the wrapper prints
-"failed to decompress"; free RAM or reboot. With `COMPRESS_BINARY=0`
-builds you need ~37 MB of overlay instead.
+The downloaded netbird binary needs ~14 MB of overlay (`df -h /overlay`) and
+~36 MB of RAM in `/tmp` (`free`) when running. If `/tmp` fills up the wrapper
+prints "failed to decompress"; free RAM or reboot.
 
 ## GL.iNet admin panel page (Applications → NetBird)
 
@@ -265,49 +267,42 @@ Maintained by [Andrea (@AndreaF17)](https://github.com/AndreaF17).
 
 ## CI
 
-CI builds the **integration package only** — the GL.iNet panel, wrapper, init
-script and self-updater, plus a current netbird binary so a fresh install works
-immediately. You rebuild only when the *panel* changes; netbird version bumps
-are handled on-device by the in-panel updater (see [Upgrading](#upgrading)), so
-there is no scheduled/automatic build.
+CI builds the **integration package only** — the GL.iNet panel, the
+`/usr/sbin/netbird` wrapper, the init script and the self-updater. No netbird
+binary is built or bundled; the router downloads netbird at install and the
+panel keeps it current (see [Upgrading](#upgrading)). So you build only when the
+panel changes, and there is no scheduled/automatic build.
 
-The build steps live once in `.github/workflows/_build.yml` (a reusable
-`workflow_call`), driven by `.github/workflows/build.yml`. The repo tag versions
-the integration; netbird resolves to its latest release at build time. Tag
-`v0.2` + netbird `0.72.3` ⇒ asset
-`netbird_0.72.3-0.2_aarch64_cortex-a53_neon-vfpv4.ipk` (the tag, minus the `v`,
-is the opkg package-release suffix).
+It's **manual, no tags required**. The build steps live once in
+`.github/workflows/_build.yml` (a reusable `workflow_call`), driven by
+`.github/workflows/build.yml`:
 
-- **Tag push** (`git tag v0.2 && git push origin v0.2`) → builds, creates
-  release `v0.2`, attaches `.ipk` + `sha256sums.txt`.
-- **Release published from the GitHub UI** → same result. (Both triggers can
-  fire for one tag — runs are serialized per tag and idempotent.)
-- **Manual run** (`workflow_dispatch`) → test builds only: optional
-  `netbird_version` / `pkg_release` inputs, produces a workflow artifact,
-  publishes nothing.
+- **Run workflow** (Actions tab → *build* → Run workflow) → enter an
+  `integration_version` (e.g. `1.0`); with *publish* ticked (default) it builds
+  `netbird_1.0_aarch64_cortex-a53_neon-vfpv4.ipk` and publishes GitHub release
+  `v1.0` with the `.ipk` + `sha256sums.txt`. Untick *publish* for a test build
+  (workflow artifact only).
+- **Tag push** (`git tag v1.0 && git push origin v1.0`) → same, as a
+  convenience, with the tag as the version.
 
-The build does not compile netbird from source: `scripts/compile.sh` downloads
-netbird's **official** prebuilt static `linux_arm64` binary and verifies it
-against the upstream `sha256sums`, then `mkipk.sh` wraps, compresses and
-packages it with the GL.iNet panel — byte-for-byte the maintainers' build, and
-the same artifact the on-device updater later pulls.
+Or build locally with `./build.sh` and attach the `.ipk` from `./out/` to a
+release yourself.
 
 ## Repo layout
 
 ```
-Makefile                     # make build | ipk | package | clean
-build.sh                     # one-shot: docker build + fetch + package -> ./out/
-docker/Dockerfile            # build environment (debian:bookworm-slim + curl)
-scripts/compile.sh           # fetch + verify official netbird binary (in container)
+Makefile                     # make ipk | clean
+build.sh                     # one-shot: docker build + package -> ./out/
+docker/Dockerfile            # build environment (debian:bookworm-slim, GNU tar)
 scripts/mkipk.sh             # legacy-format ipk assembly (runs in container)
 files/netbird.init           # procd init script -> /etc/init.d/netbird
-files/netbird-wrapper.in     # /usr/sbin/netbird wrapper (compressed layout)
-files/netbird-self-update.sh # in-panel updater: netbird binary direct from upstream
+files/netbird-wrapper.in     # /usr/sbin/netbird wrapper (extracts netbird.gz)
+files/netbird-self-update.sh # downloads netbird binary direct from upstream (install + panel)
 files/netbird.keep           # sysupgrade keep list -> /lib/upgrade/keep.d/netbird
-files/postinst, files/prerm, files/postrm  # opkg maintainer scripts
+files/postinst, files/prerm, files/postrm  # opkg maintainer scripts (postinst fetches netbird)
 files/ui/rpc/netbird         # GL admin panel: Lua RPC backend
 files/ui/menu/netbird.json   # GL admin panel: sidebar menu entry (oui menu.d)
 files/ui/www/gl-sdk4-ui-netbird.common.js  # GL admin panel: native OUI Vue 2 view
 .github/workflows/_build.yml # CI: reusable build+publish (workflow_call)
-.github/workflows/build.yml  # CI: tag / release / manual entry point (panel package)
+.github/workflows/build.yml  # CI: manual "Run workflow" entry point (panel package)
 ```

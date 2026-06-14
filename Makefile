@@ -1,29 +1,22 @@
-# NetBird .ipk builder for the GL.iNet GL-X2000.
+# NetBird GL.iNet GL-X2000 integration .ipk builder.
 #
-#   make ipk                          # compile + package (default)
-#   make build                        # compile the static binary only
+#   make ipk                          # build ./out/netbird_<version>_<arch>.ipk
+#   make ipk INTEGRATION_VERSION=1.1  # set the panel version
 #   make clean                        # remove ./out
-#   make ipk NETBIRD_VERSION=0.72.3   # pin a netbird version
 #
-# NETBIRD_VERSION defaults to the latest GitHub release (resolved in build.sh).
+# The package contains the GL panel + wrapper + self-updater only; the netbird
+# binary is downloaded on the router at install time, so there is no netbird
+# version to pin here.
 
-NETBIRD_VERSION ?=
-OPENWRT_ARCH    ?= aarch64_cortex-a53_neon-vfpv4
-COMPRESS_BINARY ?= 1
-PKG_RELEASE     ?= 1
+INTEGRATION_VERSION ?= 1.0
+OPENWRT_ARCH        ?= aarch64_cortex-a53_neon-vfpv4
 
-export NETBIRD_VERSION OPENWRT_ARCH COMPRESS_BINARY PKG_RELEASE
+export INTEGRATION_VERSION OPENWRT_ARCH
 
-.PHONY: ipk build package clean
+.PHONY: ipk clean
 
 ipk:
-	./build.sh all
-
-build:
-	./build.sh binary
-
-package:
-	./build.sh package
+	./build.sh
 
 clean:
 	rm -rf out

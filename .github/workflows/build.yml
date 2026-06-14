@@ -1,89 +1,57 @@
 name: build
 
+# Manual, no tags required: trigger from the Actions tab → "build" → Run
+# workflow. It builds the integration .ipk and (by default) publishes a GitHub
+# Release for it. Pushing a v* tag also works as a convenience.
 on:
-  # Release-driven: pushing a tag (git push origin v0.1) or publishing a
-  # GitHub Release for that tag builds the LATEST upstream netbird and
-  # attaches netbird_<netbird-ver>-<tag>_<arch>.ipk to the release.
-  push:
-    tags: ["v*"]
-  release:
-    types: [published]
-  # Manual test builds: artifact only, nothing is published.
   workflow_dispatch:
     inputs:
-      netbird_version:
-        description: "NetBird version to build (e.g. 0.72.3). Empty = latest release."
-        required: false
-        default: ""
-      pkg_release:
-        description: "Package release suffix (e.g. 0.1). Empty = 1."
-        required: false
-        default: ""
+      integration_version:
+        description: "Panel version to build/release (e.g. 1.0)"
+        required: true
+        default: "1.0"
+      publish:
+        description: "Publish a GitHub Release (untick for a test build only)"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: write
 
-# Creating a Release in the GitHub UI also pushes its tag, so both triggers
-# can fire for the same tag. Serialize them per tag; the steps are
-# idempotent (release create is guarded, uploads use --clobber).
 concurrency:
-  group: build-${{ github.event.release.tag_name || github.ref_name }}
+  group: build-${{ github.event.inputs.integration_version || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   resolve:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.resolve.outputs.version }}       # upstream netbird X.Y.Z
-      pkg_release: ${{ steps.resolve.outputs.pkg_release }} # tag without leading v
-      release_tag: ${{ steps.resolve.outputs.release_tag }} # v<pkg_release>, empty on dispatch
+      version: ${{ steps.r.outputs.version }}
+      release_tag: ${{ steps.r.outputs.release_tag }}
     steps:
-      - name: Resolve versions
-        id: resolve
+      - name: Resolve version + release tag
+        id: r
         env:
           EVENT: ${{ github.event_name }}
-          INPUT_VERSION: ${{ inputs.netbird_version }}
-          INPUT_PKG_RELEASE: ${{ inputs.pkg_release }}
+          INPUT_VERSION: ${{ github.event.inputs.integration_version }}
+          INPUT_PUBLISH: ${{ github.event.inputs.publish }}
           REF_NAME: ${{ github.ref_name }}
-          RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
           set -eu
-
-          # Upstream netbird version: dispatch input, else latest release.
-          VER=""
           if [ "$EVENT" = "workflow_dispatch" ]; then
             VER="${INPUT_VERSION#v}"
-          fi
-          if [ -z "$VER" ]; then
-            VER="$(curl -fsSL https://api.github.com/repos/netbirdio/netbird/releases/latest \
-              | jq -r '.tag_name | ltrimstr("v")')"
-          fi
-          [ -n "$VER" ] && [ "$VER" != "null" ]
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
-
-          # Package release suffix and release tag from the trigger.
-          case "$EVENT" in
-            release)
-              TAG="$RELEASE_TAG_NAME" ;;
-            push)
-              TAG="$REF_NAME" ;;
-            *)
-              TAG="" ;;
-          esac
-          if [ -n "$TAG" ]; then
-            PKG_RELEASE="${TAG#v}"
-            RELEASE_TAG="$TAG"
+            if [ "$INPUT_PUBLISH" = "true" ]; then TAG="v$VER"; else TAG=""; fi
           else
-            PKG_RELEASE="${INPUT_PKG_RELEASE:-1}"
-            RELEASE_TAG=""
+            VER="${REF_NAME#v}"
+            TAG="$REF_NAME"
           fi
-          # The suffix lands in an opkg version string and in a filename:
-          # keep it to a safe charset.
-          echo "$PKG_RELEASE" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z.+-]*$' \
-            || { echo "error: invalid tag/pkg_release '$PKG_RELEASE'" >&2; exit 1; }
-          echo "pkg_release=$PKG_RELEASE" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "Building netbird $VER as package release -$PKG_RELEASE (release tag: '${RELEASE_TAG:-none}')"
+          echo "$VER" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z.+-]*$' \
+            || { echo "error: invalid version '$VER'" >&2; exit 1; }
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building integration $VER (release tag: '${TAG:-none}')"
 
   build:
     needs: resolve
@@ -91,6 +59,5 @@ jobs:
       contents: write
     uses: ./.github/workflows/_build.yml
     with:
-      netbird_version: ${{ needs.resolve.outputs.version }}
-      pkg_release: ${{ needs.resolve.outputs.pkg_release }}
+      integration_version: ${{ needs.resolve.outputs.version }}
       release_tag: ${{ needs.resolve.outputs.release_tag }}

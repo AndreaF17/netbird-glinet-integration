@@ -169,8 +169,12 @@ cmd_run() {
     chmod 0755 "$DL_DIR/netbird"
 
     # Swap the binary in place (atomic rename), matching the installed layout.
+    # Layout is decided by whether /usr/sbin/netbird is the wrapper (a shell
+    # script) rather than by netbird.gz existing — on a fresh install the .gz
+    # is not there yet, but the wrapper is, so we must write the .gz (not
+    # clobber the wrapper).
     mkdir -p "$LIBEXEC"
-    if [ -f "$BIN_GZ" ]; then
+    if [ -f "$BIN_GZ" ] || head -n1 "$PLAIN_BIN" 2>/dev/null | grep -q '^#!'; then
         log "Installing (compressed layout) ..."
         gzip -9n -c "$DL_DIR/netbird" > "${BIN_GZ}.new"
         mv "${BIN_GZ}.new" "$BIN_GZ"

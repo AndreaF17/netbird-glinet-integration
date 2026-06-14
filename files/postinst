@@ -8,8 +8,22 @@
 # layout); the wrapper re-extracts the new one on first use.
 rm -rf /tmp/netbird-runtime
 
+# Fetch the netbird client directly from the official netbird releases. This
+# package ships no binary — the updater downloads it (verified) into
+# /usr/libexec/netbird/netbird.gz. Best-effort and non-fatal: if there's no
+# internet at install time, the package still installs and the panel's
+# "NetBird update" card can download it later.
+UPDATER=/usr/libexec/netbird/netbird-self-update.sh
+if [ -x "$UPDATER" ] || [ -f "$UPDATER" ]; then
+    echo "netbird: downloading the official client from upstream..."
+    sh "$UPDATER" run >/dev/null 2>&1 || \
+        echo "netbird: download failed; use the panel's NetBird update card once online."
+fi
+
 /etc/init.d/netbird enable
-/etc/init.d/netbird start
+# Start only if the binary actually got downloaded (no internet at install
+# leaves netbird.gz absent; the panel can fetch it later).
+[ -f /usr/libexec/netbird/netbird.gz ] && /etc/init.d/netbird start
 
 # GL.iNet admin panel UI (native OUI page, Applications → NetBird).
 # The shipped /usr/share/oui/menu.d/netbird.json carries default parent_*

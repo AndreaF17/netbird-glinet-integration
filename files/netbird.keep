@@ -5,7 +5,7 @@
 #
 # The full runtime is listed -- not just the enrollment config -- so the
 # VPN reconnects right after a firmware upgrade without reinstalling the
-# ipk. Paths that don't exist in a given layout (COMPRESS_BINARY=0 vs 1)
+# ipk. Paths that don't exist yet (e.g. the binary hasn't been downloaded)
 # are silently skipped by sysupgrade's file collection.
 
 # Enrollment / device identity (config.json lives here)
@@ -18,11 +18,10 @@
 /etc/rc.d/S99netbird
 /etc/rc.d/K10netbird
 
-# Binary: wrapper + gzipped payload (default layout), or the plain binary
-# at /usr/sbin/netbird when built with COMPRESS_BINARY=0 (netbird.gz then
-# simply doesn't exist and is skipped). netbird.version records the binary
-# version the panel currently runs (updated in place by the self-updater), so
-# it travels with the binary across a firmware upgrade.
+# Binary: the wrapper plus the gzipped netbird payload downloaded at install /
+# from the panel. netbird.version records which netbird version that binary is
+# (written by the self-updater), so the installed netbird version travels with
+# the binary across a firmware upgrade.
 /usr/sbin/netbird
 /usr/libexec/netbird/netbird.gz
 /usr/libexec/netbird/netbird.version

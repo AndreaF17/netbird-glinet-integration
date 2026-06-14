@@ -1,9 +1,7 @@
-# Reusable build: compile the static netbird binary, package the .ipk, and
-# (optionally) publish a GitHub Release with the artifacts attached.
-#
-# This is the single source of truth for the build steps. It is called by:
-#   - build.yml          (tag / release / manual, derives versions from the event)
-#   - watch-upstream.yml (daily poll of upstream netbird, fully automatic)
+# Reusable build: package the GL-X2000 NetBird integration .ipk and optionally
+# publish a GitHub Release with the artifacts attached. The package contains the
+# panel + wrapper + self-updater only (no netbird binary — the router downloads
+# netbird at install time), so it is versioned by the integration version.
 #
 # Pass release_tag="" to produce artifacts only (no Release is published).
 name: _build
@@ -11,15 +9,10 @@ name: _build
 on:
   workflow_call:
     inputs:
-      netbird_version:
-        description: "Upstream netbird version to build, e.g. 0.72.3 (no leading v)."
+      integration_version:
+        description: "Panel/integration version, e.g. 1.0"
         required: true
         type: string
-      pkg_release:
-        description: "Package release suffix (opkg). Bump for packaging-only changes."
-        required: false
-        type: string
-        default: "1"
       release_tag:
         description: "Tag to publish the Release under. Empty = artifact only."
         required: false
@@ -37,8 +30,7 @@ jobs:
 
       - name: Build .ipk
         env:
-          NETBIRD_VERSION: ${{ inputs.netbird_version }}
-          PKG_RELEASE: ${{ inputs.pkg_release }}
+          INTEGRATION_VERSION: ${{ inputs.integration_version }}
         run: ./build.sh
 
       - name: Checksums
@@ -50,27 +42,23 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: netbird-ipk-${{ inputs.netbird_version }}-${{ inputs.pkg_release }}
+          name: netbird-glx2000-${{ inputs.integration_version }}
           path: |
             out/netbird_*.ipk
             out/sha256sums.txt
 
       - name: Publish release
-        # Tag-driven runs only. Creating the release also creates the tag (for
-        # the upstream watcher), and is guarded + idempotent so a UI-created
-        # release or a re-run just clobbers the uploaded assets.
         if: inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          VER: ${{ inputs.netbird_version }}
-          PKG_RELEASE: ${{ inputs.pkg_release }}
+          VER: ${{ inputs.integration_version }}
           TAG: ${{ inputs.release_tag }}
         run: |
           set -eu
           if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
-              --title "netbird $VER for GL.iNet GL-X2000 ($TAG)" \
-              --notes "Static NetBird client $VER packaged as netbird_${VER}-${PKG_RELEASE} (.ipk, aarch64_cortex-a53_neon-vfpv4, GL-X2000). Built from https://github.com/netbirdio/netbird/releases/tag/v$VER"
+              --title "NetBird GL-X2000 panel $VER" \
+              --notes "GL.iNet GL-X2000 NetBird integration $VER (.ipk, aarch64_cortex-a53_neon-vfpv4). Panel + wrapper + self-updater; the netbird client is downloaded from the official netbird releases at install and updated from the panel."
           fi
           gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber \
             out/netbird_*.ipk out/sha256sums.txt
