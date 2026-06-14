@@ -13,20 +13,26 @@ local cjson = require "cjson"
 
 local M = {}
 
-local BIN = "/usr/sbin/netbird"
+local BIN = "/usr/sbin/netbird"           -- wrapper (compressed layout) or the binary (plain)
 local INIT = "/etc/init.d/netbird"
 local UP_LOG = "/tmp/netbird-up.log"
 local UP_LOCK = "/tmp/netbird-up.lock"
--- Self-update (panel "Software update" card). The heavy lifting lives in a
--- shipped shell script so the download/verify/opkg logic stays testable and
+local LIBEXEC = "/usr/libexec/netbird"
+local BIN_GZ = LIBEXEC .. "/netbird.gz"        -- gzipped binary in the compressed layout
+local VERSION_FILE = LIBEXEC .. "/netbird.version"  -- version stamp written by the self-updater
+-- Self-update (panel "NetBird update" card). The heavy lifting lives in a
+-- shipped shell script so the download/verify/swap logic stays testable and
 -- out of the request worker; see files/netbird-self-update.sh.
-local SELF_UPDATE = "/usr/libexec/netbird/netbird-self-update.sh"
+local SELF_UPDATE = LIBEXEC .. "/netbird-self-update.sh"
 local UPD_LOG = "/tmp/netbird-update.log"
 local UPD_LOCK = "/tmp/netbird-update.lock"
 
--- Cached version. Invalidated per-worker when the netbird binary mtime
--- changes (e.g. after a package upgrade). Each nginx worker holds its own
--- cache; the mtime check ensures re-read without an nginx restart.
+-- Cached version. Invalidated per-worker when the netbird payload changes.
+-- BIN is the wrapper script whose mtime is fixed at install, so the cache is
+-- keyed on the files the self-updater actually rewrites (the version stamp,
+-- then the gzipped binary), falling back to BIN for the plain layout. Each
+-- nginx worker holds its own cache; the mtime check re-reads it without an
+-- nginx restart.
 local cached_version = nil
 local cached_version_mtime = 0
 
@@ -70,11 +76,24 @@ local function file_mtime(path)
 end
 
 local function get_version()
-    local mtime = file_mtime(BIN)
+    -- Key the cache on what the self-updater rewrites, NOT on BIN (the wrapper
+    -- mtime never changes), so a panel-driven binary update is reflected
+    -- without an nginx restart.
+    local mtime = file_mtime(VERSION_FILE)
+    if mtime == 0 then mtime = file_mtime(BIN_GZ) end
+    if mtime == 0 then mtime = file_mtime(BIN) end
     if cached_version and mtime > 0 and mtime == cached_version_mtime then
         return cached_version
     end
-    local ver = exec(BIN .. " version 2>/dev/null")
+    -- Prefer the version stamp (fast, no 36 MB extraction); fall back to the
+    -- binary itself (timeout-guarded) only when the stamp is missing.
+    local ver
+    local f = io.open(VERSION_FILE, "r")
+    if f then ver = f:read("*l"); f:close() end
+    if not ver or ver == "" then
+        ver = exec("timeout 10 " .. BIN .. " version 2>/dev/null")
+    end
+    if ver then ver = ver:gsub("^v", "") end
     cached_version = ver and ver:match("^(%S+)") or "unknown"
     cached_version_mtime = mtime
     return cached_version
@@ -170,6 +189,7 @@ end
     @in string ?management_url  Self-hosted management URL (default api.netbird.io)
 --]]
 function M.up(params)
+    params = params or {}
     if not file_exists(BIN) then
         return { err_code = -1, err_msg = "netbird binary not found" }
     end
@@ -219,6 +239,7 @@ end
     @in bool enabled  desired SSH server state
 --]]
 function M.set_ssh(params)
+    params = params or {}
     if not file_exists(BIN) then
         return { err_code = -1, err_msg = "netbird binary not found" }
     end
@@ -288,6 +309,7 @@ end
     @in string action  one of: start, stop, restart, enable, disable
 --]]
 function M.service(params)
+    params = params or {}
     local allowed = {
         start = true, stop = true, restart = true,
         enable = true, disable = true,
@@ -296,8 +318,9 @@ function M.service(params)
     if type(action) ~= "string" or not allowed[action] then
         return { err_code = -1, err_msg = "Invalid action" }
     end
-    -- start/stop/restart can block for a few seconds — run detached for
-    -- stop/restart of a connected daemon, synchronous is fine for the rest.
+    -- Synchronous: start/stop/restart can block for a few seconds while procd
+    -- settles, which is acceptable here — the UI shows a busy state and
+    -- re-polls status once the call returns.
     local rc = exec_rc(INIT .. " " .. action .. " >/dev/null 2>&1")
     if rc ~= 0 and (action == "enable" or action == "disable") then
         -- rc.common enable returns non-zero on some 19.07 builds even on
@@ -326,25 +349,23 @@ end
 --[[
     @method-type: call
     @method-name: check_update
-    @method-desc: Check this repo's GitHub Releases for a newer package and
-                  report whether an update is available. No side effects; the
-                  result is cached for 30 min by the shipped script so frequent
-                  panel loads do not hammer the GitHub API.
+    @method-desc: Check netbird's own GitHub Releases for a newer netbird
+                  binary and report whether an update is available. No side
+                  effects; the result is cached for 30 min by the shipped
+                  script so frequent panel loads do not hammer the GitHub API.
 
     @out bool   ok                check succeeded (network reachable)
-    @out string current           installed package version (e.g. 0.72.3-1)
-    @out string latest            latest published package version
+    @out string current           installed netbird version (e.g. 0.72.3)
+    @out string latest            latest published netbird version
     @out bool   update_available  latest is newer than installed
-    @out string name              latest .ipk filename
-    @out string url               latest .ipk download URL
-    @out string html_url          GitHub release page
+    @out string html_url          netbird release page
     @out string ?error            present when ok=false
 --]]
 function M.check_update()
     if not file_exists(SELF_UPDATE) then
         return { ok = false, error = "updater not installed" }
     end
-    -- Generous timeout: a cold check makes two small HTTPS calls.
+    -- Generous timeout: a cold check makes one small HTTPS call to the API.
     local out = exec("timeout 25 sh " .. SELF_UPDATE .. " check 2>/dev/null")
     if out and #out > 0 then
         local ok, r = pcall(cjson.decode, out)
@@ -356,10 +377,11 @@ end
 --[[
     @method-type: call
     @method-name: do_update
-    @method-desc: Download, checksum-verify and install the latest release.
-                  Runs fully detached (setsid) so it survives the nginx and
-                  netbird restarts that opkg's postinst triggers — and the
-                  tunnel teardown on `opkg remove`. Progress is written to the
+    @method-desc: Download, checksum-verify and swap in the latest netbird
+                  binary (no opkg, no package — just the binary). Runs fully
+                  detached (setsid) so it outlives the request worker and
+                  survives the netbird daemon restart (and brief tunnel drop)
+                  the updater does at the end. Progress is written to the
                   update log; poll get_update_log for it.
 --]]
 function M.do_update()
@@ -370,8 +392,8 @@ function M.do_update()
         return { err_code = -2, err_msg = "An update is already in progress" }
     end
     -- The runner clears the lock when finished. setsid detaches it into its own
-    -- session so a `kill $(pgrep nginx)` in postinst cannot reach it; nohup is
-    -- the fallback on the rare build without setsid.
+    -- session so it outlives this request worker (and the netbird restart it
+    -- triggers); nohup is the fallback on the rare build without setsid.
     local runner = "sh " .. SELF_UPDATE .. " run; rm -f " .. UPD_LOCK
     local full = "touch " .. UPD_LOCK .. "; "
         .. "if command -v setsid >/dev/null 2>&1; then "

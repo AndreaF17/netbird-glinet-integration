@@ -1,22 +1,28 @@
 # NetBird .ipk for GL.iNet GL-X2000
 
-Builds the [NetBird](https://github.com/netbirdio/netbird) VPN client from
-source and packages it as an installable `.ipk` for the **GL.iNet GL-X2000**
-(firmware 4.7.x, QSDK-based OpenWrt 19.07 fork, `ipq50xx`, kernel 5.4, musl).
+Packages the official [NetBird](https://github.com/netbirdio/netbird) VPN
+client as an installable `.ipk` for the **GL.iNet GL-X2000** (firmware 4.7.x,
+QSDK-based OpenWrt 19.07 fork, `ipq50xx`, kernel 5.4, musl). The netbird binary
+is **not** built or bundled here — the router downloads the official release at
+install time and the in-panel updater keeps it current; this package versions
+the *integration* (panel + wrapper + init + self-updater).
 
-Maintained by @me
+Maintained by [@AndreaF17](https://github.com/AndreaF17)
 — bug reports and feature requests are welcome on the
 [issue tracker](https://github.com/AndreaF17/netbird-glinet-integration/issues).
 
 ## Why not the OpenWrt SDK?
 
 Upstream OpenWrt 19.07 has no `ipq50xx` target — it only exists in GL.iNet's
-QSDK, which is not publicly buildable. Instead, the NetBird client is
-cross-compiled as a **fully static Go binary** (`CGO_ENABLED=0 GOOS=linux
-GOARCH=arm64`). A static Go binary has zero libc dependency, so the router's
-old musl userland and QSDK quirks are irrelevant. The `.ipk` is assembled
-with plain GNU tar in the legacy format opkg 19.07 expects
-(`debian-binary` + `control.tar.gz` + `data.tar.gz`).
+QSDK, which is not publicly buildable, so there is no SDK to build a netbird
+package against. Instead this integration uses netbird's own official
+`linux_arm64` release binary, which upstream ships as a **fully static Go
+binary** (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64`). A static Go binary has zero
+libc dependency, so the router's old musl userland and QSDK quirks are
+irrelevant — the same binary `pkgs.netbird.io` installs runs here unchanged.
+The `.ipk` itself is assembled with plain GNU tar in the legacy format opkg
+19.07 expects (`debian-binary` + `control.tar.gz` + `data.tar.gz`) and carries
+only the integration; the binary is fetched on the router at install time.
 
 WireGuard: NetBird uses the kernel WireGuard module when present and
 transparently falls back to its embedded userspace `wireguard-go` (which
