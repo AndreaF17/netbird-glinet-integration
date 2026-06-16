@@ -229,12 +229,15 @@ end
 --[[
     @method-type: call
     @method-name: set_ssh
-    @method-desc: Enable/disable the embedded NetBird SSH server. Runs
-                  `netbird up --allow-server-ssh[=false]` in the background
-                  (disable requires a down/up cycle per NetBird docs);
-                  progress lands in the same log as connect (get_up_log).
-                  The management server must permit SSH (peer setting /
-                  ACL), otherwise netbird reports "not permitted" in the log.
+    @method-desc: Enable/disable the embedded NetBird SSH server. Toggling it
+                  requires a reconnect — `netbird down` then
+                  `netbird up --allow-server-ssh[=false]` — in BOTH directions:
+                  a bare `up` while already connected does not apply the change
+                  (NetBird docs / netbird issue #2816). Runs in the background;
+                  progress lands in the same log as connect (get_up_log). SSH
+                  also needs a "NetBird SSH" access policy in the NetBird
+                  dashboard, otherwise connections are refused even with the
+                  server enabled here.
 
     @in bool enabled  desired SSH server state
 --]]
@@ -250,13 +253,13 @@ function M.set_ssh(params)
         return { err_code = -3, err_msg = "Another operation is already in progress" }
     end
 
-    local cmd
-    if params.enabled then
-        cmd = "timeout 90 " .. BIN .. " up --allow-server-ssh"
-    else
-        -- Per NetBird docs, disabling needs: netbird down && netbird up --allow-server-ssh=false
-        cmd = "timeout 15 " .. BIN .. " down; timeout 90 " .. BIN .. " up --allow-server-ssh=false"
-    end
+    -- Toggling the SSH server only takes effect after a reconnect, so BOTH
+    -- enable and disable do `netbird down` then `netbird up` with the flag.
+    -- The previous enable path ran a bare `up --allow-server-ssh` while still
+    -- connected, which netbird ignores (the server never actually came up).
+    local flag = params.enabled and "--allow-server-ssh" or "--allow-server-ssh=false"
+    local cmd = "timeout 15 " .. BIN .. " down; "
+        .. "timeout 90 " .. BIN .. " up " .. flag
 
     local full = "touch " .. UP_LOCK .. "; "
         .. "(" .. cmd .. " > " .. UP_LOG .. " 2>&1; "

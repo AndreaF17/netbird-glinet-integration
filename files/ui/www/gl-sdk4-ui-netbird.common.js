@@ -16,6 +16,19 @@ module.exports = (function () {
   'use strict';
 
   var VERSION = '{{VERSION}}';
+  // This integration's own GitHub repo. Its Releases are the *panel* releases
+  // (separate from netbird's binary releases shown in the update card).
+  var PANEL_REPO = 'AndreaF17/netbird-glinet-integration';
+
+  // Dotted-version compare: is a strictly older than b? ('1.0' < '1.1').
+  function verLt(a, b) {
+    var pa = String(a).split('.'), pb = String(b).split('.');
+    for (var i = 0; i < Math.max(pa.length, pb.length); i++) {
+      var x = parseInt(pa[i], 10) || 0, y = parseInt(pb[i], 10) || 0;
+      if (x !== y) return x < y;
+    }
+    return false;
+  }
 
   // -- RPC: prefer the panel's own helper; fall back to raw /rpc ----------
   function callRpc(method, params) {
@@ -120,14 +133,19 @@ module.exports = (function () {
         updHtmlUrl: '',       // release page link
         updating: false,      // an install is running
         updLog: '',
-        updLogTimer: null
+        updLogTimer: null,
+        // -- panel/integration self-release notice (this repo's Releases) --
+        panelLatest: '',        // newest published panel version (e.g. 1.1)
+        panelUpdAvailable: false,
+        panelHtmlUrl: ''        // release page to send the user to
       };
     },
 
     created: function () {
       this.fetchStatus();
       this.timer = setInterval(this.fetchStatus, 4000);
-      this.checkUpdate();   // auto-check once on load; install stays manual
+      this.checkUpdate();        // netbird binary update (via the router)
+      this.checkPanelUpdate();   // this panel's own release (via the browser)
     },
 
     beforeDestroy: function () {
@@ -308,6 +326,25 @@ module.exports = (function () {
         });
       },
 
+      // Check this repo's own GitHub Releases for a newer *panel* build.
+      // Queried from the admin's browser (not the router): no install, no
+      // RPC — just a notice that links to the release page. GitHub's API
+      // sends CORS headers for public repos, so the fetch works cross-origin;
+      // any failure (offline, rate-limited) is silently ignored.
+      checkPanelUpdate: function () {
+        var self = this;
+        fetch('https://api.github.com/repos/' + PANEL_REPO + '/releases/latest', {
+          headers: { 'Accept': 'application/vnd.github+json' }
+        }).then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) {
+            if (!d || !d.tag_name) return;
+            var latest = String(d.tag_name).replace(/^v/, '');
+            self.panelLatest = latest;
+            self.panelHtmlUrl = d.html_url || '';
+            self.panelUpdAvailable = verLt(VERSION, latest);
+          }).catch(function () {});
+      },
+
       startUpdate: function () {
         var self = this;
         if (self.updating || !self.updAvailable) return;
@@ -450,7 +487,21 @@ module.exports = (function () {
           [daemonBtn])),
         row('Start on boot', [bootToggle]),
         row('Management connection', mgmtState),
-        row('Allow NetBird SSH access', [sshToggle]),
+        h('div', {
+          style: {
+            padding: '10px 18px', borderBottom: '1px solid #f5f5f5',
+            fontSize: '13px', color: '#303133'
+          }
+        }, [
+          h('div', {
+            style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: '26px' }
+          }, [
+            h('span', { style: { color: '#606266' } }, 'Allow NetBird SSH access'),
+            sshToggle
+          ]),
+          h('div', { style: { fontSize: '11px', color: '#a0a0a3', lineHeight: '1.4', marginTop: '4px' } },
+            'Toggling reconnects NetBird briefly. Access also needs a "NetBird SSH" policy in your NetBird dashboard.')
+        ]),
         row('NetBird IP', [h('span', {}, self.running ? self.nbIp : '-')]),
         row('Hostname (FQDN)', [h('span', {}, self.running ? self.nbFqdn : '-')])
       ]);
@@ -665,8 +716,30 @@ module.exports = (function () {
         }
       }, 'The netbird binary was not found at /usr/sbin/netbird. Reinstall the package.') : null;
 
+      // New *panel* release available (this integration, not netbird itself):
+      // a dismissible-feeling info bar that links straight to the release page.
+      var panelBanner = self.panelUpdAvailable ? h('div', {
+        style: {
+          marginBottom: '16px', padding: '12px 16px', borderRadius: '8px',
+          background: '#eef3ff', borderLeft: '3px solid #5272f7', color: '#303133',
+          fontSize: '13px', lineHeight: '1.5', display: 'flex',
+          justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap'
+        }
+      }, [
+        h('span', {}, 'A new NetBird GL-X2000 panel is available — v' + self.panelLatest
+          + ' (you have v' + VERSION + ').'),
+        self.panelHtmlUrl ? h('a', {
+          attrs: { href: self.panelHtmlUrl, target: '_blank', rel: 'noopener' },
+          style: {
+            fontSize: '12px', fontWeight: '600', color: '#fff', background: '#5272f7',
+            borderRadius: '14px', padding: '5px 14px', textDecoration: 'none', whiteSpace: 'nowrap'
+          }
+        }, 'View release') : null
+      ]) : null;
+
       return h('div', { style: { padding: '16px', maxWidth: '760px', margin: '0 auto' } }, [
         banner,
+        panelBanner,
         statusCard,
         updateCard,
         connectCard,
