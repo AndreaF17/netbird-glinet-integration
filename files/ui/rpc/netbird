@@ -20,6 +20,7 @@ local UP_LOCK = "/tmp/netbird-up.lock"
 local LIBEXEC = "/usr/libexec/netbird"
 local BIN_GZ = LIBEXEC .. "/netbird.gz"        -- gzipped binary in the compressed layout
 local VERSION_FILE = LIBEXEC .. "/netbird.version"  -- version stamp written by the self-updater
+local SSH_ROOT_STATE = "/etc/netbird/.panel_ssh_root"  -- panel-tracked "allow root login" pref
 -- Self-update (panel "NetBird update" card). The heavy lifting lives in a
 -- shipped shell script so the download/verify/swap logic stays testable and
 -- out of the request worker; see files/netbird-self-update.sh.
@@ -149,6 +150,18 @@ local function ssh_server_enabled()
     return false
 end
 
+-- Helper: panel-tracked "allow root login" preference. netbird exposes no
+-- status line for --enable-ssh-root, so the panel records the value it last
+-- applied (in /etc/netbird, which persists across upgrades) and reads it back
+-- for the toggle. Authoritative only for panel-driven changes.
+local function ssh_root_enabled()
+    local f = io.open(SSH_ROOT_STATE, "r")
+    if not f then return false end
+    local v = f:read("*l")
+    f:close()
+    return v == "1"
+end
+
 -- Input validation. Values are passed to a shell command line, so the
 -- charset is strict: no quotes, spaces, semicolons, backticks, etc.
 local function valid_setup_key(s)
@@ -181,6 +194,7 @@ function M.get_status()
     res.version = get_version()
     res.up_in_progress = file_exists(UP_LOCK)
     res.ssh_enabled = ssh_server_enabled()
+    res.ssh_root_enabled = ssh_root_enabled()
 
     local status = netbird_status()
     if status then
@@ -241,17 +255,21 @@ end
 --[[
     @method-type: call
     @method-name: set_ssh
-    @method-desc: Enable/disable the embedded NetBird SSH server. Toggling it
-                  requires a reconnect — `netbird down` then
-                  `netbird up --allow-server-ssh[=false]` — in BOTH directions:
-                  a bare `up` while already connected does not apply the change
-                  (NetBird docs / netbird issue #2816). Runs in the background;
+    @method-desc: Enable/disable the embedded NetBird SSH server and, optionally,
+                  root login (--enable-ssh-root). Toggling either only takes
+                  effect after a reconnect — `netbird down` then `netbird up`
+                  with the full desired flag set — in BOTH directions: a bare
+                  `up` while already connected does not apply the change (NetBird
+                  docs / netbird issue #2816). Both flags are passed every time
+                  so they don't reset each other. Runs in the background;
                   progress lands in the same log as connect (get_up_log). SSH
                   also needs a "NetBird SSH" access policy in the NetBird
-                  dashboard, otherwise connections are refused even with the
-                  server enabled here.
+                  dashboard (authorizing root, for root login), otherwise
+                  connections are refused even with the server enabled here.
 
-    @in bool enabled  desired SSH server state
+    @in bool  enabled  desired SSH server state
+    @in bool ?root     desired root-login state (--enable-ssh-root); when
+                       omitted the current panel-tracked value is preserved
 --]]
 function M.set_ssh(params)
     params = params or {}
@@ -265,13 +283,28 @@ function M.set_ssh(params)
         return { err_code = -3, err_msg = "Another operation is already in progress" }
     end
 
-    -- Toggling the SSH server only takes effect after a reconnect, so BOTH
-    -- enable and disable do `netbird down` then `netbird up` with the flag.
-    -- The previous enable path ran a bare `up --allow-server-ssh` while still
-    -- connected, which netbird ignores (the server never actually came up).
-    local flag = params.enabled and "--allow-server-ssh" or "--allow-server-ssh=false"
-    local cmd = "timeout 15 " .. BIN .. " down; "
-        .. "timeout 90 " .. BIN .. " up " .. flag
+    -- Root-login preference. Preserve the current value if the caller didn't
+    -- pass one (e.g. when only the SSH-server toggle changed).
+    local want_root = params.root
+    if want_root == nil then want_root = ssh_root_enabled() end
+
+    -- Toggling the SSH server (or the root flag) only takes effect after a
+    -- reconnect, so every change does `netbird down` then `netbird up` with the
+    -- full flag set. Passing both flags every time keeps them from resetting
+    -- each other; a bare `up` while connected applies nothing (issue #2816).
+    local cmd
+    if params.enabled then
+        local root_flag = want_root and "--enable-ssh-root" or "--enable-ssh-root=false"
+        cmd = "timeout 15 " .. BIN .. " down; "
+            .. "timeout 90 " .. BIN .. " up --allow-server-ssh " .. root_flag
+    else
+        cmd = "timeout 15 " .. BIN .. " down; "
+            .. "timeout 90 " .. BIN .. " up --allow-server-ssh=false"
+    end
+
+    -- Record the root preference for the panel toggle's state.
+    local rf = io.open(SSH_ROOT_STATE, "w")
+    if rf then rf:write(want_root and "1" or "0"); rf:close() end
 
     local full = "touch " .. UP_LOCK .. "; "
         .. "(" .. cmd .. " > " .. UP_LOG .. " 2>&1; "

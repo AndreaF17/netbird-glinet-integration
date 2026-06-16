@@ -111,6 +111,7 @@ module.exports = (function () {
         status: null,
         upInProgress: false,
         sshEnabled: false,
+        sshRootEnabled: false,
         upLog: '',
         setupKey: '',
         mgmtUrl: '',
@@ -201,6 +202,7 @@ module.exports = (function () {
           self.status = res.status || null;
           self.upInProgress = !!res.up_in_progress;
           self.sshEnabled = !!res.ssh_enabled;
+          self.sshRootEnabled = !!res.ssh_root_enabled;
           self.loading = false;
           if (self.upInProgress) self.startLogPolling();
         }).catch(function () { self.loading = false; });
@@ -276,10 +278,31 @@ module.exports = (function () {
         self.busy = true;
         self.upLog = '';
         self.setMsg((target ? 'Enabling' : 'Disabling') + ' SSH…', false);
-        callRpc('set_ssh', { enabled: target }).then(function (res) {
+        // Preserve the root-login preference when only the server toggles.
+        callRpc('set_ssh', { enabled: target, root: self.sshRootEnabled }).then(function (res) {
           res = res || {};
           self.busy = false;
           if (res.err_code) { self.setMsg(res.err_msg || 'SSH change failed', true); return; }
+          self.upInProgress = true;
+          self.startLogPolling();
+        }).catch(function (e) {
+          self.busy = false;
+          self.setMsg(String(e && e.message ? e.message : e), true);
+        });
+      },
+
+      toggleSshRoot: function () {
+        var self = this;
+        // Only meaningful while the SSH server is on and connected.
+        if (self.busy || self.upInProgress || !self.running || !self.mgmtConnected || !self.sshEnabled) return;
+        var target = !self.sshRootEnabled;
+        self.busy = true;
+        self.upLog = '';
+        self.setMsg((target ? 'Enabling' : 'Disabling') + ' root login…', false);
+        callRpc('set_ssh', { enabled: true, root: target }).then(function (res) {
+          res = res || {};
+          self.busy = false;
+          if (res.err_code) { self.setMsg(res.err_msg || 'Root login change failed', true); return; }
           self.upInProgress = true;
           self.startLogPolling();
         }).catch(function (e) {
@@ -472,6 +495,10 @@ module.exports = (function () {
       var sshDisabled = self.busy || self.upInProgress || !self.running || !self.mgmtConnected;
       var sshToggle = makeToggle(self.sshEnabled, sshDisabled, self.toggleSsh);
 
+      // Root login only applies while the SSH server is on.
+      var sshRootDisabled = sshDisabled || !self.sshEnabled;
+      var sshRootToggle = makeToggle(self.sshEnabled && self.sshRootEnabled, sshRootDisabled, self.toggleSshRoot);
+
       var mgmtState = self.running && self.mgmtConnected ? dot('ok', 'Connected')
         : self.running ? dot('warn', self.upInProgress ? 'Connecting…' : 'Disconnected')
         : dot('err', 'Daemon stopped');
@@ -500,7 +527,15 @@ module.exports = (function () {
             sshToggle
           ]),
           h('div', { style: { fontSize: '11px', color: '#a0a0a3', lineHeight: '1.4', marginTop: '4px' } },
-            'Toggling reconnects NetBird briefly. Access also needs a "NetBird SSH" policy in your NetBird dashboard.')
+            'Toggling reconnects NetBird briefly. Access also needs a "NetBird SSH" policy in your NetBird dashboard.'),
+          h('div', {
+            style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: '26px', marginTop: '10px' }
+          }, [
+            h('span', { style: { color: self.sshEnabled ? '#606266' : '#c0c4cc' } }, 'Allow root login'),
+            sshRootToggle
+          ]),
+          h('div', { style: { fontSize: '11px', color: '#a0a0a3', lineHeight: '1.4', marginTop: '4px' } },
+            'Lets you SSH in as root (the router\'s admin user) from the NetBird console. Needs the SSH server on above, plus a "NetBird SSH" policy that authorizes root in your dashboard.')
         ]),
         row('NetBird IP', [h('span', {}, self.running ? self.nbIp : '-')]),
         row('Hostname (FQDN)', [h('span', {}, self.running ? self.nbFqdn : '-')])
