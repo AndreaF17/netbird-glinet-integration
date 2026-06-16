@@ -123,9 +123,21 @@ local function netbird_status()
     return nil
 end
 
--- Helper: is the embedded NetBird SSH server allowed? Read from the
--- persistent client config — `netbird status --json` does not expose it.
-local function ssh_allowed()
+-- Helper: is the embedded NetBird SSH server actually running?
+-- Prefer the LIVE daemon state from `netbird status` (its
+-- "SSH Server: Enabled/Disabled" line) — that's what the user sees on the CLI
+-- and what actually governs SSH. The persistent config's ServerSSHAllowed can
+-- be stale (left true by an enable that never took effect on the daemon), so
+-- it's only a fallback when the status line can't be read (e.g. daemon down).
+local function ssh_server_enabled()
+    if daemon_running() then
+        local out = exec("timeout 10 " .. BIN .. " status 2>/dev/null")
+        if out then
+            local v = out:match("SSH Server:%s*(%a+)")
+            if v then return v:lower() == "enabled" end
+        end
+    end
+    -- Fallback: persistent client config.
     local f = io.open("/etc/netbird/config.json", "r")
     if not f then return false end
     local data = f:read("*a")
@@ -168,7 +180,7 @@ function M.get_status()
     res.running = daemon_running()
     res.version = get_version()
     res.up_in_progress = file_exists(UP_LOCK)
-    res.ssh_enabled = ssh_allowed()
+    res.ssh_enabled = ssh_server_enabled()
 
     local status = netbird_status()
     if status then
