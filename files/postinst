@@ -8,22 +8,34 @@
 # layout); the wrapper re-extracts the new one on first use.
 rm -rf /tmp/netbird-runtime
 
-# Fetch the netbird client directly from the official netbird releases. This
-# package ships no binary — the updater downloads it (verified) into
-# /usr/libexec/netbird/netbird.gz. Best-effort and non-fatal: if there's no
-# internet at install time, the package still installs and the panel's
-# "NetBird update" card can download it later.
+# netbird client (downloaded directly from the official netbird releases; this
+# package ships no binary). The updater only transfers a binary when needed:
+#   * Fresh install (no netbird.gz yet)  -> download it now.
+#   * Panel upgrade (netbird.gz present) -> the updater compares the installed
+#     netbird version against upstream and downloads ONLY if a newer one
+#     exists; if it is already current it skips the download, so a 1.0 -> 1.1
+#     panel upgrade just refreshes the panel and leaves netbird untouched.
+# Best-effort and non-fatal. On a fresh install with no internet the package
+# still installs and the panel's "NetBird update" card fetches netbird later;
+# on a panel upgrade a failed check is ignored because the existing client
+# stays in place.
 UPDATER=/usr/libexec/netbird/netbird-self-update.sh
+BIN_GZ=/usr/libexec/netbird/netbird.gz
 if [ -x "$UPDATER" ] || [ -f "$UPDATER" ]; then
-    echo "netbird: downloading the official client from upstream..."
-    sh "$UPDATER" run >/dev/null 2>&1 || \
-        echo "netbird: download failed; use the panel's NetBird update card once online."
+    if [ -f "$BIN_GZ" ]; then
+        echo "netbird: client already installed; updating only if a newer version exists..."
+        sh "$UPDATER" run >/dev/null 2>&1 || true
+    else
+        echo "netbird: downloading the official client from upstream..."
+        sh "$UPDATER" run >/dev/null 2>&1 || \
+            echo "netbird: download failed; use the panel's NetBird update card once online."
+    fi
 fi
 
 /etc/init.d/netbird enable
-# Start only if the binary actually got downloaded (no internet at install
-# leaves netbird.gz absent; the panel can fetch it later).
-[ -f /usr/libexec/netbird/netbird.gz ] && /etc/init.d/netbird start
+# Start once the binary is present (a first install with no internet leaves
+# netbird.gz absent; the panel can fetch it later).
+[ -f "$BIN_GZ" ] && /etc/init.d/netbird start
 
 # GL.iNet admin panel UI (native OUI page, Applications → NetBird).
 # The shipped /usr/share/oui/menu.d/netbird.json carries default parent_*
