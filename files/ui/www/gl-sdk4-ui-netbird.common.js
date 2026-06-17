@@ -139,6 +139,7 @@ module.exports = (function () {
         panelLatest: '',        // newest published panel version (e.g. 1.1)
         panelUpdAvailable: false,
         panelHtmlUrl: '',       // release page to send the user to
+        panelConfirm: false,    // "Update now" clicked; awaiting Install/Cancel
         panelUpdating: false,   // an opkg-install of the new panel is running
         panelUpdLog: '',
         panelUpdLogTimer: null,
@@ -377,6 +378,7 @@ module.exports = (function () {
       startPanelUpdate: function () {
         var self = this;
         if (self.panelUpdating || !self.panelUpdAvailable) return;
+        self.panelConfirm = false;
         self.panelUpdating = true;
         self.panelUpdLog = '';
         callRpc('do_panel_update', {}).then(function (res) {
@@ -833,19 +835,37 @@ module.exports = (function () {
             h('span', {}, self.panelUpdating
               ? ('Updating panel to v' + self.panelLatest + '…')
               : ('A new NetBird GL-X2000 panel is available — v' + self.panelLatest + ' (you have v' + VERSION + ').')),
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } }, [
-              (!self.panelUpdating && self.panelHtmlUrl) ? h('a', {
-                attrs: { href: self.panelHtmlUrl, target: '_blank', rel: 'noopener' },
-                style: { fontSize: '12px', color: '#5272f7' }
-              }, 'release notes') : null,
-              h('button', {
-                style: self.panelUpdating ? disabled(BTN) : BTN,
-                attrs: { disabled: self.panelUpdating },
-                on: { click: self.startPanelUpdate }
-              }, self.panelUpdating ? 'Updating…' : 'Update now')
-            ])
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } },
+              self.panelUpdating
+                ? [h('button', { style: disabled(BTN), attrs: { disabled: true } }, 'Updating…')]
+                : self.panelConfirm
+                  ? [
+                      h('button', { style: BTN, on: { click: self.startPanelUpdate } },
+                        'Install v' + self.panelLatest),
+                      h('button', {
+                        style: BTN_PLAIN,
+                        on: { click: function () { self.panelConfirm = false; } }
+                      }, 'Cancel')
+                    ]
+                  : [
+                      self.panelHtmlUrl ? h('a', {
+                        attrs: { href: self.panelHtmlUrl, target: '_blank', rel: 'noopener' },
+                        style: { fontSize: '12px', color: '#5272f7' }
+                      }, 'release notes') : null,
+                      h('button', {
+                        style: BTN,
+                        on: { click: function () { self.panelConfirm = true; } }
+                      }, 'Update now')
+                    ]
+            )
           ])
         ];
+        if (self.panelConfirm && !self.panelUpdating) {
+          pbChildren.push(h('div', {
+            style: { fontSize: '12px', color: '#5a6b8c', marginTop: '8px', lineHeight: '1.5' }
+          }, 'This downloads and installs v' + self.panelLatest + ' with opkg and restarts the panel '
+             + '(the VPN reconnects automatically). Continue?'));
+        }
         if (self.panelUpdating || self.panelUpdLog) {
           pbChildren.push(h('pre', { style: panelLogStyle }, self.panelUpdLog || 'Starting…'));
         }
