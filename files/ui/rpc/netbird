@@ -27,6 +27,12 @@ local SSH_ROOT_STATE = "/etc/netbird/.panel_ssh_root"  -- panel-tracked "allow r
 local SELF_UPDATE = LIBEXEC .. "/netbird-self-update.sh"
 local UPD_LOG = "/tmp/netbird-update.log"
 local UPD_LOCK = "/tmp/netbird-update.lock"
+-- Panel self-update (the "Update now" button on the new-panel banner). Downloads
+-- this integration's latest .ipk and opkg-installs it; see panel-self-update.sh.
+local PANEL_UPDATE = LIBEXEC .. "/panel-self-update.sh"
+local PANEL_LOG = "/tmp/netbird-panel-update.log"
+local PANEL_LOCK = "/tmp/netbird-panel-update.lock"
+local PANEL_TMP = "/tmp/netbird-panel-update.run.sh"
 
 -- Cached version. Invalidated per-worker when the netbird payload changes.
 -- BIN is the wrapper script whose mtime is fixed at install, so the cache is
@@ -462,6 +468,59 @@ end
 function M.get_update_log()
     local res = { log = "", in_progress = file_exists(UPD_LOCK) }
     local f = io.open(UPD_LOG, "r")
+    if f then
+        local size = f:seek("end")
+        local from = size > 8192 and size - 8192 or 0
+        f:seek("set", from)
+        res.log = f:read("*a") or ""
+        f:close()
+    end
+    return res
+end
+
+--[[
+    @method-type: call
+    @method-name: do_panel_update
+    @method-desc: Download THIS integration's latest .ipk from its GitHub
+                  Releases into /tmp, verify the sha256, `opkg install` it and
+                  remove the .ipk. Runs fully detached (setsid) from a /tmp copy
+                  of the updater, so it survives opkg replacing the panel's own
+                  files and the nginx restart its postinst triggers. Poll
+                  get_panel_update_log; the page must be reloaded afterwards to
+                  pick up the new view.
+--]]
+function M.do_panel_update()
+    if not file_exists(PANEL_UPDATE) then
+        return { err_code = -1, err_msg = "panel updater not installed" }
+    end
+    if file_exists(PANEL_LOCK) then
+        return { err_code = -2, err_msg = "A panel update is already in progress" }
+    end
+    -- Stage the updater in /tmp and run THAT copy: opkg overwrites
+    -- /usr/libexec/netbird/panel-self-update.sh during the install, which would
+    -- otherwise be yanked out from under the running shell. setsid detaches it
+    -- so the `kill nginx` in our own postinst cannot reach the install.
+    local runner = "cp " .. PANEL_UPDATE .. " " .. PANEL_TMP
+        .. " && sh " .. PANEL_TMP .. " run; rm -f " .. PANEL_LOCK .. " " .. PANEL_TMP
+    local full = "touch " .. PANEL_LOCK .. "; "
+        .. "if command -v setsid >/dev/null 2>&1; then "
+        .. "setsid sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & "
+        .. "else nohup sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & fi"
+    ngx.pipe.spawn({"sh", "-c", full})
+    return { status = "panel_update_started" }
+end
+
+--[[
+    @method-type: call
+    @method-name: get_panel_update_log
+    @method-desc: Tail of the panel self-update progress log.
+
+    @out string log          last 8KB of the panel update log
+    @out bool   in_progress  a panel update is still running
+--]]
+function M.get_panel_update_log()
+    local res = { log = "", in_progress = file_exists(PANEL_LOCK) }
+    local f = io.open(PANEL_LOG, "r")
     if f then
         local size = f:seek("end")
         local from = size > 8192 and size - 8192 or 0

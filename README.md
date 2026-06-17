@@ -131,15 +131,26 @@ ssh root@192.168.8.1 "sh /usr/libexec/netbird/netbird-self-update.sh run; \
   cat /tmp/netbird-update.log"
 ```
 
-**Updating the panel** (rare — only when this integration changes) is a normal
-opkg upgrade of a new `.ipk`. Because the package no longer carries the netbird
-binary it's tiny, so the old "remove first / Only have NNNNkb" flash dance no
-longer applies — a straight `opkg install` of a newer `INTEGRATION_VERSION`
-upgrades in place:
+**Updating the panel** is easiest **from the panel itself.** When a newer panel
+release is published here, Applications → NetBird shows a blue banner ("A new
+NetBird GL-X2000 panel is available — vX.Y"); click **Update now** and the
+router downloads that `.ipk` into `/tmp`, verifies its sha256, `opkg install`s
+it and deletes the `.ipk` — then reload the page. Backed by
+`files/panel-self-update.sh` (run detached from a `/tmp` copy so opkg can
+replace the panel's own files mid-install); progress is logged to
+`/tmp/netbird-panel-update.log`.
+
+Doing it by hand is still a normal opkg upgrade of a new `.ipk`. Because the
+package no longer carries the netbird binary it's tiny, so the old "remove
+first / Only have NNNNkb" flash dance no longer applies — a straight `opkg
+install` of a newer `INTEGRATION_VERSION` upgrades in place:
 
 ```sh
 scp ./out/netbird_<newver>_*.ipk root@192.168.8.1:/tmp/
 ssh root@192.168.8.1 "opkg install /tmp/netbird_<newver>_*.ipk"
+# or run the in-panel updater by hand:
+ssh root@192.168.8.1 "sh /usr/libexec/netbird/panel-self-update.sh run; \
+  cat /tmp/netbird-panel-update.log"
 ```
 
 The downloaded netbird binary (`/usr/libexec/netbird/netbird.gz`) and
@@ -304,6 +315,7 @@ scripts/mkipk.sh             # legacy-format ipk assembly (runs in container)
 files/netbird.init           # procd init script -> /etc/init.d/netbird
 files/netbird-wrapper.in     # /usr/sbin/netbird wrapper (extracts netbird.gz)
 files/netbird-self-update.sh # downloads netbird binary direct from upstream (install + panel)
+files/panel-self-update.sh   # downloads + opkg-installs a newer panel .ipk (panel "Update now")
 files/netbird.keep           # sysupgrade keep list -> /lib/upgrade/keep.d/netbird
 files/postinst, files/prerm, files/postrm  # opkg maintainer scripts (postinst fetches netbird)
 files/ui/rpc/netbird         # GL admin panel: Lua RPC backend

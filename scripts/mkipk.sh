@@ -64,6 +64,13 @@ install -m 0755 "$FILES_DIR/netbird.init" "$DATA/etc/init.d/netbird"
 install -m 0755 "$FILES_DIR/netbird-self-update.sh" \
     "$DATA/usr/libexec/netbird/netbird-self-update.sh"
 
+# Panel self-updater: downloads THIS integration's latest .ipk from our own
+# GitHub Releases into /tmp, verifies its sha256, `opkg install`s it and removes
+# the .ipk. Driven by the "Update now" button on the new-panel banner (RPC
+# do_panel_update).
+install -m 0755 "$FILES_DIR/panel-self-update.sh" \
+    "$DATA/usr/libexec/netbird/panel-self-update.sh"
+
 # No netbird binary or version file shipped — postinst fetches netbird and the
 # updater writes /usr/libexec/netbird/netbird.version after the download.
 

@@ -138,7 +138,11 @@ module.exports = (function () {
         // -- panel/integration self-release notice (this repo's Releases) --
         panelLatest: '',        // newest published panel version (e.g. 1.1)
         panelUpdAvailable: false,
-        panelHtmlUrl: ''        // release page to send the user to
+        panelHtmlUrl: '',       // release page to send the user to
+        panelUpdating: false,   // an opkg-install of the new panel is running
+        panelUpdLog: '',
+        panelUpdLogTimer: null,
+        panelUpdDone: false     // install finished; page needs a reload
       };
     },
 
@@ -153,6 +157,7 @@ module.exports = (function () {
       if (this.timer) clearInterval(this.timer);
       if (this.logTimer) clearInterval(this.logTimer);
       if (this.updLogTimer) clearInterval(this.updLogTimer);
+      if (this.panelUpdLogTimer) clearInterval(this.panelUpdLogTimer);
     },
 
     computed: {
@@ -366,6 +371,47 @@ module.exports = (function () {
             self.panelHtmlUrl = d.html_url || '';
             self.panelUpdAvailable = verLt(VERSION, latest);
           }).catch(function () {});
+      },
+
+      // Download + opkg-install the newer panel .ipk (runs on the router).
+      startPanelUpdate: function () {
+        var self = this;
+        if (self.panelUpdating || !self.panelUpdAvailable) return;
+        self.panelUpdating = true;
+        self.panelUpdLog = '';
+        callRpc('do_panel_update', {}).then(function (res) {
+          res = res || {};
+          if (res.err_code) {
+            self.panelUpdating = false;
+            self.setMsg(res.err_msg || 'Could not start panel update', true);
+            return;
+          }
+          self.startPanelUpdateLogPolling();
+        }).catch(function (e) {
+          self.panelUpdating = false;
+          self.setMsg(String(e && e.message ? e.message : e), true);
+        });
+      },
+
+      startPanelUpdateLogPolling: function () {
+        var self = this;
+        if (self.panelUpdLogTimer) return;
+        var poll = function () {
+          callRpc('get_panel_update_log', {}).then(function (res) {
+            res = res || {};
+            if (res.log) self.panelUpdLog = String(res.log);
+            if (!res.in_progress) {
+              if (self.panelUpdLogTimer) { clearInterval(self.panelUpdLogTimer); self.panelUpdLogTimer = null; }
+              self.panelUpdating = false;
+              self.panelUpdDone = true;
+            }
+          }).catch(function () {
+            // nginx is killed + restarted while opkg installs the new panel —
+            // keep polling; it comes back once the web stack is up again.
+          });
+        };
+        poll();
+        self.panelUpdLogTimer = setInterval(poll, 2500);
       },
 
       startUpdate: function () {
@@ -751,26 +797,66 @@ module.exports = (function () {
         }
       }, 'The netbird binary was not found at /usr/sbin/netbird. Reinstall the package.') : null;
 
-      // New *panel* release available (this integration, not netbird itself):
-      // a dismissible-feeling info bar that links straight to the release page.
-      var panelBanner = self.panelUpdAvailable ? h('div', {
-        style: {
-          marginBottom: '16px', padding: '12px 16px', borderRadius: '8px',
-          background: '#eef3ff', borderLeft: '3px solid #5272f7', color: '#303133',
-          fontSize: '13px', lineHeight: '1.5', display: 'flex',
-          justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap'
+      // New *panel* release (this integration, not netbird itself): info bar
+      // with an "Update now" button that downloads the .ipk and opkg-installs it
+      // on the router, shows progress, then asks to reload for the new view.
+      var panelBannerStyle = {
+        marginBottom: '16px', padding: '12px 16px', borderRadius: '8px',
+        background: '#eef3ff', borderLeft: '3px solid #5272f7', color: '#303133',
+        fontSize: '13px', lineHeight: '1.5'
+      };
+      var panelLogStyle = {
+        margin: '10px 0 0', padding: '10px 12px', background: '#1e1e24',
+        color: '#c9c9d1', fontFamily: 'monospace', fontSize: '11px',
+        lineHeight: '1.5', borderRadius: '6px', maxHeight: '200px',
+        overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all'
+      };
+      var panelBanner = null;
+      if (self.panelUpdDone) {
+        panelBanner = h('div', {
+          style: Object.assign({}, panelBannerStyle, {
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            gap: '12px', flexWrap: 'wrap', background: '#eafaf6', borderLeftColor: '#00c8b5'
+          })
+        }, [
+          h('span', {}, 'Panel updated. Reload this page to load the new version.'),
+          h('button', {
+            style: BTN,
+            on: { click: function () { try { window.location.reload(); } catch (e) {} } }
+          }, 'Reload')
+        ]);
+      } else if (self.panelUpdAvailable || self.panelUpdating) {
+        var pbChildren = [
+          h('div', {
+            style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }
+          }, [
+            h('span', {}, self.panelUpdating
+              ? ('Updating panel to v' + self.panelLatest + '…')
+              : ('A new NetBird GL-X2000 panel is available — v' + self.panelLatest + ' (you have v' + VERSION + ').')),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } }, [
+              (!self.panelUpdating && self.panelHtmlUrl) ? h('a', {
+                attrs: { href: self.panelHtmlUrl, target: '_blank', rel: 'noopener' },
+                style: { fontSize: '12px', color: '#5272f7' }
+              }, 'release notes') : null,
+              h('button', {
+                style: self.panelUpdating ? disabled(BTN) : BTN,
+                attrs: { disabled: self.panelUpdating },
+                on: { click: self.startPanelUpdate }
+              }, self.panelUpdating ? 'Updating…' : 'Update now')
+            ])
+          ])
+        ];
+        if (self.panelUpdating || self.panelUpdLog) {
+          pbChildren.push(h('pre', { style: panelLogStyle }, self.panelUpdLog || 'Starting…'));
         }
-      }, [
-        h('span', {}, 'A new NetBird GL-X2000 panel is available — v' + self.panelLatest
-          + ' (you have v' + VERSION + ').'),
-        self.panelHtmlUrl ? h('a', {
-          attrs: { href: self.panelHtmlUrl, target: '_blank', rel: 'noopener' },
-          style: {
-            fontSize: '12px', fontWeight: '600', color: '#fff', background: '#5272f7',
-            borderRadius: '14px', padding: '5px 14px', textDecoration: 'none', whiteSpace: 'nowrap'
-          }
-        }, 'View release') : null
-      ]) : null;
+        if (self.panelUpdating) {
+          pbChildren.push(h('div', {
+            style: { fontSize: '12px', color: '#5a6b8c', marginTop: '8px', lineHeight: '1.5' }
+          }, 'Downloading the new panel .ipk to /tmp and installing it with opkg. The web UI restarts '
+             + 'during install, so this page may briefly disconnect — it finishes on its own.'));
+        }
+        panelBanner = h('div', { style: panelBannerStyle }, pbChildren);
+      }
 
       return h('div', { style: { padding: '16px', maxWidth: '760px', margin: '0 auto' } }, [
         banner,
