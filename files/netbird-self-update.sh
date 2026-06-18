@@ -176,8 +176,8 @@ cmd_run() {
     mkdir -p "$LIBEXEC"
     if [ -f "$BIN_GZ" ] || head -n1 "$PLAIN_BIN" 2>/dev/null | grep -q '^#!'; then
         log "Installing (compressed layout) ..."
-        gzip -9n -c "$DL_DIR/netbird" > "${BIN_GZ}.new"
-        mv "${BIN_GZ}.new" "$BIN_GZ"
+        rm -f "$BIN_GZ"
+        gzip -1n -c "$DL_DIR/netbird" > "$BIN_GZ"
         rm -rf "$RUNTIME_DIR"          # force the wrapper to re-extract the new binary
     else
         log "Installing (plain layout) ..."
