@@ -44,20 +44,20 @@ log() { echo "$(date '+%H:%M:%S') $*" >> "$LOG"; }
 # ---- HTTP (curl preferred; uclient-fetch / wget fallback) -----------------
 http_get() {        # url -> stdout
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -A "$UA" "$1"
+        curl -fsSL --connect-timeout 15 --max-time 60 -A "$UA" "$1"
     elif command -v uclient-fetch >/dev/null 2>&1; then
-        uclient-fetch -qO - "$1"
+        uclient-fetch -qO - --timeout=60 "$1"
     else
-        wget -qO - "$1"
+        wget -qO - -T 60 "$1"
     fi
 }
 http_download() {   # url dest  (follows the redirect to objects.githubusercontent.com)
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -A "$UA" -o "$2" "$1"
+        curl -fsSL --connect-timeout 15 --max-time 300 -A "$UA" -o "$2" "$1"
     elif command -v uclient-fetch >/dev/null 2>&1; then
-        uclient-fetch -qO "$2" "$1"
+        uclient-fetch -qO "$2" --timeout=300 "$1"
     else
-        wget -qO "$2" "$1"
+        wget -qO "$2" -T 300 "$1"
     fi
 }
 
