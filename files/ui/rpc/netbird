@@ -248,12 +248,15 @@ function M.up(params)
     end
 
     -- Background with lock + log so the UI can poll progress. The charset
-    -- validation above makes the interpolation shell-safe.
+    -- validation above makes the interpolation shell-safe. The subshell is
+    -- detached from the pipe's stdout (</dev/null >/dev/null 2>&1) so it
+    -- survives the parent sh exiting; real output goes to UP_LOG explicitly.
     local cmd = "touch " .. UP_LOCK .. "; "
         .. "(timeout 90 " .. BIN .. " up" .. args .. " > " .. UP_LOG .. " 2>&1; "
         .. "echo \"[exit code: $?]\" >> " .. UP_LOG .. "; "
-        .. "rm -f " .. UP_LOCK .. ") &"
-    ngx.pipe.spawn({"sh", "-c", cmd})
+        .. "rm -f " .. UP_LOCK .. ") </dev/null >/dev/null 2>&1 &"
+    local r = ngx.pipe.spawn({"sh", "-c", cmd})
+    if r then r:stdout_read_all(); r:wait() end
 
     return { status = "up_started" }
 end
@@ -312,11 +315,16 @@ function M.set_ssh(params)
     local rf = io.open(SSH_ROOT_STATE, "w")
     if rf then rf:write(want_root and "1" or "0"); rf:close() end
 
+    -- Wrap the entire command set so all output (including `down`) goes to the
+    -- log. Detach the subshell from the pipe's stdout so it survives GC of the
+    -- ngx.pipe handle; the real output goes to UP_LOG explicitly.
     local full = "touch " .. UP_LOCK .. "; "
-        .. "(" .. cmd .. " > " .. UP_LOG .. " 2>&1; "
+        .. "{ " .. cmd .. " ; } > " .. UP_LOG .. " 2>&1; "
         .. "echo \"[exit code: $?]\" >> " .. UP_LOG .. "; "
-        .. "rm -f " .. UP_LOCK .. ") &"
-    ngx.pipe.spawn({"sh", "-c", full})
+        .. "rm -f " .. UP_LOCK
+    local outer = "(" .. full .. ") </dev/null >/dev/null 2>&1 &"
+    local r = ngx.pipe.spawn({"sh", "-c", outer})
+    if r then r:stdout_read_all(); r:wait() end
 
     return { status = "ssh_started" }
 end
@@ -330,7 +338,8 @@ function M.down()
     if not daemon_running() then
         return { err_code = -1, err_msg = "NetBird daemon is not running" }
     end
-    ngx.pipe.spawn({"sh", "-c", "timeout 15 " .. BIN .. " down >/dev/null 2>&1 &"})
+    local r = ngx.pipe.spawn({"sh", "-c", "timeout 15 " .. BIN .. " down >/dev/null 2>&1 &"})
+    if r then r:stdout_read_all(); r:wait() end
     return { status = "down_started" }
 end
 
@@ -448,12 +457,15 @@ function M.do_update()
     -- The runner clears the lock when finished. setsid detaches it into its own
     -- session so it outlives this request worker (and the netbird restart it
     -- triggers); nohup is the fallback on the rare build without setsid.
+    -- We must read stdout and wait on the parent shell to prevent ngx.pipe GC
+    -- from killing it before the background job is launched.
     local runner = "sh " .. SELF_UPDATE .. " run; rm -f " .. UPD_LOCK
     local full = "touch " .. UPD_LOCK .. "; "
         .. "if command -v setsid >/dev/null 2>&1; then "
         .. "setsid sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & "
         .. "else nohup sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & fi"
-    ngx.pipe.spawn({"sh", "-c", full})
+    local r = ngx.pipe.spawn({"sh", "-c", full})
+    if r then r:stdout_read_all(); r:wait() end
     return { status = "update_started" }
 end
 
@@ -506,7 +518,8 @@ function M.do_panel_update()
         .. "if command -v setsid >/dev/null 2>&1; then "
         .. "setsid sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & "
         .. "else nohup sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & fi"
-    ngx.pipe.spawn({"sh", "-c", full})
+    local r = ngx.pipe.spawn({"sh", "-c", full})
+    if r then r:stdout_read_all(); r:wait() end
     return { status = "panel_update_started" }
 end
 
