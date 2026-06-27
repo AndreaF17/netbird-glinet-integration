@@ -27,3 +27,10 @@ start_service() {
 	procd_set_param file "$CONFIG"
 	procd_close_instance
 }
+
+stop_service() {
+	# Reclaim the ~37 MB binary the wrapper extracted into RAM-backed /tmp.
+	# The wrapper re-extracts it from netbird.gz on the next start, so this is
+	# free to do and keeps RAM usage minimal while the VPN is stopped.
+	rm -rf /tmp/netbird-runtime
+}

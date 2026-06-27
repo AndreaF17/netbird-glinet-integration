@@ -10,7 +10,24 @@
 rm -rf /tmp/netbird-runtime \
        /tmp/netbird-up.log /tmp/netbird-up.lock \
        /tmp/netbird-update.log /tmp/netbird-update.lock \
-       /tmp/netbird-update-check.json /tmp/netbird-update
+       /tmp/netbird-update-check.json /tmp/netbird-update \
+       /tmp/netbird-panel-update /tmp/netbird-panel-update.log \
+       /tmp/netbird-panel-update.lock /tmp/netbird-panel-update.run.sh
+
+# Reclaim the runtime-downloaded netbird payload. netbird.gz (~13 MB on the
+# ~24 MB overlay) and netbird.version are written by the self-updater, so opkg
+# does NOT track them and would otherwise orphan them on the flash forever.
+# Skip on upgrade so the panel-upgrade fast path keeps the existing binary;
+# if opkg passes no argument on upgrade we re-download in postinst, which is
+# only a bandwidth cost, never data loss (config.json in /etc/netbird persists).
+case "${1:-remove}" in
+    upgrade) : ;;
+    *)
+        rm -f /usr/libexec/netbird/netbird.gz \
+              /usr/libexec/netbird/netbird.version
+        rmdir /usr/libexec/netbird 2>/dev/null || true
+        ;;
+esac
 
 # Hard restart, not reload: OpenResty workers cache the (now deleted) RPC
 # module until fully restarted.

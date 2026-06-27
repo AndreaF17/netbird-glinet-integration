@@ -161,26 +161,43 @@ cmd_run() {
     fi
     log "Checksum OK (${got})."
 
-    log "Extracting netbird binary ..."
-    if ! tar -xzf "$DL_DIR/$tarball" -C "$DL_DIR" netbird; then
-        log "ERROR: could not extract 'netbird' from the archive. Aborting."
-        return 1
-    fi
-    chmod 0755 "$DL_DIR/netbird"
-
-    # Swap the binary in place (atomic rename), matching the installed layout.
-    # Layout is decided by whether /usr/sbin/netbird is the wrapper (a shell
-    # script) rather than by netbird.gz existing — on a fresh install the .gz
-    # is not there yet, but the wrapper is, so we must write the .gz (not
-    # clobber the wrapper).
+    # Install, matching the layout already on disk. Layout is decided by whether
+    # /usr/sbin/netbird is the wrapper (a shell script) rather than by netbird.gz
+    # existing — on a fresh install the .gz is not there yet, but the wrapper is,
+    # so we must write the .gz (not clobber the wrapper).
     mkdir -p "$LIBEXEC"
     if [ -f "$BIN_GZ" ] || head -n1 "$PLAIN_BIN" 2>/dev/null | grep -q '^#!'; then
         log "Installing (compressed layout) ..."
+        # Remove the old payload BEFORE writing the new one: the ~24 MB overlay
+        # cannot hold two ~13 MB .gz copies, so an atomic .new+rename won't fit.
+        # The source tarball is already sha256-verified, so we trust the stream
+        # and validate the result below.
         rm -f "$BIN_GZ"
-        gzip -1n -c "$DL_DIR/netbird" > "$BIN_GZ"
+        # Stream the binary straight from the verified tarball into gzip -9 --
+        # never materialising the ~37 MB uncompressed binary in RAM-backed /tmp.
+        # gzip -9 (vs -1) saves ~1.4 MB on the tiny overlay for a one-time CPU
+        # cost; decompression speed is unaffected by the level.
+        if ! tar -xzOf "$DL_DIR/$tarball" netbird 2>/dev/null | gzip -9n > "$BIN_GZ"; then
+            log "ERROR: extract/recompress pipeline failed (overlay full?). Aborting."
+            rm -f "$BIN_GZ"
+            return 1
+        fi
+        # Validate: a plausibly-sized binary must decompress out (guards a
+        # truncated extract that still produced a structurally-valid .gz).
+        nbytes="$(gunzip -c "$BIN_GZ" 2>/dev/null | wc -c)"
+        if [ ! -s "$BIN_GZ" ] || [ "${nbytes:-0}" -lt 20000000 ]; then
+            log "ERROR: recompressed binary failed validation (${nbytes:-0} bytes). Aborting."
+            rm -f "$BIN_GZ"
+            return 1
+        fi
         rm -rf "$RUNTIME_DIR"          # force the wrapper to re-extract the new binary
     else
         log "Installing (plain layout) ..."
+        if ! tar -xzf "$DL_DIR/$tarball" -C "$DL_DIR" netbird; then
+            log "ERROR: could not extract 'netbird' from the archive. Aborting."
+            return 1
+        fi
+        chmod 0755 "$DL_DIR/netbird"
         install -m 0755 "$DL_DIR/netbird" "${PLAIN_BIN}.new"
         mv "${PLAIN_BIN}.new" "$PLAIN_BIN"
     fi
