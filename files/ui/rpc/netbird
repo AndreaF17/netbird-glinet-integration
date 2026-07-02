@@ -82,6 +82,60 @@ local function file_mtime(path)
     return tonumber((data or ""):match("^(%d+)")) or 0
 end
 
+-- A background job (self-update / panel-update) that crashes or is killed leaves
+-- its lock behind, which otherwise wedges the UI on "in progress" forever and
+-- makes every later attempt return "already in progress". Reap such a lock:
+-- stale if the PID it records is no longer alive, or (before the job wrote its
+-- PID, or an unreadable lock) if it is older than the TTL. A genuinely running
+-- job is left untouched.
+local LOCK_TTL = 1200   -- 20 min: comfortably longer than any real update
+local function clear_stale_lock(path)
+    if not file_exists(path) then return end
+    local pid
+    local f = io.open(path, "r")
+    if f then pid = (f:read("*l") or ""):match("^(%d+)"); f:close() end
+    if pid then
+        -- kill -0 succeeds while the process is alive (the worker runs as root,
+        -- so it can always signal it). Dead PID => the job is gone => stale.
+        if exec_rc("kill -0 " .. pid .. " 2>/dev/null") == 0 then return end
+        os.remove(path)
+        return
+    end
+    -- No PID recorded yet: fall back to age.
+    local mt = file_mtime(path)
+    local now = tonumber(os.time()) or 0
+    if mt > 0 and now - mt > LOCK_TTL then os.remove(path) end
+end
+
+-- Launch `runner` (a shell command string) fully detached from this request
+-- worker, so it survives both the RPC returning and any service restart it
+-- triggers.
+--
+-- ngx.pipe puts the shell we spawn into its own process group and SIGKILLs that
+-- whole group at request cleanup; a bare `cmd &` background job is still in that
+-- group and gets killed before it does anything. `setsid` moves the job into a
+-- new session (out of the doomed group); `nohup` (or, last resort, a plain
+-- background job with its stdio detached) is the fallback when setsid is absent.
+-- The trailing `sleep 1` keeps the ngx-tracked shell alive until setsid has
+-- re-parented the job, so cleanup cannot race the detach and kill it first.
+--
+-- Lock lifecycle (crash-safe): the lock is touched synchronously here so the
+-- matching `*_in_progress` flag is true the instant we return; the detached job
+-- overwrites it with its own PID and removes it on exit. A job that dies without
+-- cleaning up is reaped by clear_stale_lock (dead PID, or older than LOCK_TTL).
+local function spawn_detached(lockfile, runner)
+    local job = "echo $$ > " .. lockfile .. "; " .. runner .. "; rm -f " .. lockfile
+    local full = "touch " .. lockfile .. "; "
+        .. "if command -v setsid >/dev/null 2>&1; then "
+        .. "setsid sh -c '" .. job .. "' </dev/null >/dev/null 2>&1 & "
+        .. "elif command -v nohup >/dev/null 2>&1; then "
+        .. "nohup sh -c '" .. job .. "' </dev/null >/dev/null 2>&1 & "
+        .. "else sh -c '" .. job .. "' </dev/null >/dev/null 2>&1 & fi; "
+        .. "sleep 1"
+    local r = ngx.pipe.spawn({"sh", "-c", full})
+    if r then r:stdout_read_all(); r:wait() end
+end
+
 local function get_version()
     -- Key the cache on what the self-updater rewrites, NOT on BIN (the wrapper
     -- mtime never changes), so a panel-driven binary update is reflected
@@ -451,21 +505,14 @@ function M.do_update()
     if not file_exists(SELF_UPDATE) then
         return { err_code = -1, err_msg = "updater script not installed" }
     end
+    clear_stale_lock(UPD_LOCK)
     if file_exists(UPD_LOCK) then
         return { err_code = -2, err_msg = "An update is already in progress" }
     end
-    -- The runner clears the lock when finished. setsid detaches it into its own
-    -- session so it outlives this request worker (and the netbird restart it
-    -- triggers); nohup is the fallback on the rare build without setsid.
-    -- We must read stdout and wait on the parent shell to prevent ngx.pipe GC
-    -- from killing it before the background job is launched.
-    local runner = "sh " .. SELF_UPDATE .. " run; rm -f " .. UPD_LOCK
-    local full = "touch " .. UPD_LOCK .. "; "
-        .. "if command -v setsid >/dev/null 2>&1; then "
-        .. "setsid sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & "
-        .. "else nohup sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & fi"
-    local r = ngx.pipe.spawn({"sh", "-c", full})
-    if r then r:stdout_read_all(); r:wait() end
+    -- Fully detached (see spawn_detached): outlives this request worker and the
+    -- netbird restart the updater does at the end. The updater logs progress to
+    -- UPD_LOG; poll get_update_log for it.
+    spawn_detached(UPD_LOCK, "sh " .. SELF_UPDATE .. " run")
     return { status = "update_started" }
 end
 
@@ -478,6 +525,7 @@ end
     @out bool   in_progress  an update is still running
 --]]
 function M.get_update_log()
+    clear_stale_lock(UPD_LOCK)
     local res = { log = "", in_progress = file_exists(UPD_LOCK) }
     local f = io.open(UPD_LOG, "r")
     if f then
@@ -505,21 +553,18 @@ function M.do_panel_update()
     if not file_exists(PANEL_UPDATE) then
         return { err_code = -1, err_msg = "panel updater not installed" }
     end
+    clear_stale_lock(PANEL_LOCK)
     if file_exists(PANEL_LOCK) then
         return { err_code = -2, err_msg = "A panel update is already in progress" }
     end
     -- Stage the updater in /tmp and run THAT copy: opkg overwrites
     -- /usr/libexec/netbird/panel-self-update.sh during the install, which would
-    -- otherwise be yanked out from under the running shell. setsid detaches it
-    -- so the `kill nginx` in our own postinst cannot reach the install.
+    -- otherwise be yanked out from under the running shell. spawn_detached moves
+    -- it into its own session so the `kill nginx` in our own postinst cannot
+    -- reach the install (and it owns the lock; we only clean up the /tmp copy).
     local runner = "cp " .. PANEL_UPDATE .. " " .. PANEL_TMP
-        .. " && sh " .. PANEL_TMP .. " run; rm -f " .. PANEL_LOCK .. " " .. PANEL_TMP
-    local full = "touch " .. PANEL_LOCK .. "; "
-        .. "if command -v setsid >/dev/null 2>&1; then "
-        .. "setsid sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & "
-        .. "else nohup sh -c '" .. runner .. "' </dev/null >/dev/null 2>&1 & fi"
-    local r = ngx.pipe.spawn({"sh", "-c", full})
-    if r then r:stdout_read_all(); r:wait() end
+        .. " && sh " .. PANEL_TMP .. " run; rm -f " .. PANEL_TMP
+    spawn_detached(PANEL_LOCK, runner)
     return { status = "panel_update_started" }
 end
 
@@ -532,6 +577,7 @@ end
     @out bool   in_progress  a panel update is still running
 --]]
 function M.get_panel_update_log()
+    clear_stale_lock(PANEL_LOCK)
     local res = { log = "", in_progress = file_exists(PANEL_LOCK) }
     local f = io.open(PANEL_LOG, "r")
     if f then

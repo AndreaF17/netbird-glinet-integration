@@ -398,14 +398,35 @@ module.exports = (function () {
       startPanelUpdateLogPolling: function () {
         var self = this;
         if (self.panelUpdLogTimer) return;
+        var POLL_MS = 2500;
+        // Same failure mode as the netbird updater: if the detached job dies
+        // before writing a line, the backend clears the stale lock and
+        // in_progress goes false with an empty log. Don't report that as a
+        // successful install — surface an error instead. (A real install logs
+        // "Starting…/Downloading…" well before nginx restarts, so waitedNoLog
+        // resets long before the timeout.)
+        var waitedNoLog = 0;
+        var stop = function () {
+          if (self.panelUpdLogTimer) { clearInterval(self.panelUpdLogTimer); self.panelUpdLogTimer = null; }
+          self.panelUpdating = false;
+        };
         var poll = function () {
           callRpc('get_panel_update_log', {}).then(function (res) {
             res = res || {};
             if (res.log) self.panelUpdLog = String(res.log);
             if (!res.in_progress) {
-              if (self.panelUpdLogTimer) { clearInterval(self.panelUpdLogTimer); self.panelUpdLogTimer = null; }
-              self.panelUpdating = false;
-              self.panelUpdDone = true;
+              stop();
+              if (self.panelUpdLog) {
+                self.panelUpdDone = true;
+              } else {
+                self.setMsg('The panel updater stopped before it could start. Please try again.', true);
+              }
+              return;
+            }
+            waitedNoLog = self.panelUpdLog ? 0 : waitedNoLog + POLL_MS;
+            if (waitedNoLog >= 30000) {
+              stop();
+              self.setMsg('The panel update did not start (no progress after 30s). Please try again.', true);
             }
           }).catch(function () {
             // nginx is killed + restarted while opkg installs the new panel —
@@ -413,7 +434,7 @@ module.exports = (function () {
           });
         };
         poll();
-        self.panelUpdLogTimer = setInterval(poll, 2500);
+        self.panelUpdLogTimer = setInterval(poll, POLL_MS);
       },
 
       startUpdate: function () {
@@ -438,24 +459,44 @@ module.exports = (function () {
       startUpdateLogPolling: function () {
         var self = this;
         if (self.updLogTimer) return;
+        var POLL_MS = 2500;
+        // If the updater dies before writing its first log line (e.g. it was
+        // killed at spawn), the backend clears the stale lock and in_progress
+        // goes false with an empty log — or, worst case, lingers. Either way we
+        // surface an error instead of spinning "Updating…" forever.
+        var waitedNoLog = 0;
+        var stop = function () {
+          if (self.updLogTimer) { clearInterval(self.updLogTimer); self.updLogTimer = null; }
+          self.updating = false;
+        };
         var poll = function () {
           callRpc('get_update_log', {}).then(function (res) {
             res = res || {};
             if (res.log) self.updLog = String(res.log);
             if (!res.in_progress) {
-              if (self.updLogTimer) { clearInterval(self.updLogTimer); self.updLogTimer = null; }
-              self.updating = false;
+              stop();
+              if (!self.updLog) {
+                self.setMsg('The updater stopped before it could start. Please try again.', true);
+              }
               // Re-read installed version + re-check (the panel may reload as
               // nginx restarts; this refreshes whatever survives).
               self.fetchStatus();
               self.checkUpdate();
+              return;
+            }
+            // Still "in progress" but not a single line logged: the job is
+            // wedged (or never really launched). Bail out after a grace period.
+            waitedNoLog = self.updLog ? 0 : waitedNoLog + POLL_MS;
+            if (waitedNoLog >= 30000) {
+              stop();
+              self.setMsg('The update did not start (no progress after 30s). Please try again.', true);
             }
           }).catch(function () {
-            // nginx is briefly down during opkg install/postinst — keep polling.
+            // nginx is briefly down during the daemon restart — keep polling.
           });
         };
         poll();
-        self.updLogTimer = setInterval(poll, 2500);
+        self.updLogTimer = setInterval(poll, POLL_MS);
       }
     },
 
