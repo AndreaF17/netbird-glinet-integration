@@ -252,6 +252,7 @@ function M.get_status()
     res.enabled = exec_rc(INIT .. " enabled") == 0
     res.running = daemon_running()
     res.version = get_version()
+    clear_stale_lock(UP_LOCK)
     res.up_in_progress = file_exists(UP_LOCK)
     res.ssh_enabled = ssh_server_enabled()
     res.ssh_root_enabled = ssh_root_enabled()
@@ -283,6 +284,7 @@ function M.up(params)
         exec_rc(INIT .. " start")
         -- give procd a moment; `netbird up` retries the socket anyway
     end
+    clear_stale_lock(UP_LOCK)
     if file_exists(UP_LOCK) then
         return { err_code = -2, err_msg = "A connect attempt is already in progress" }
     end
@@ -305,10 +307,13 @@ function M.up(params)
     -- validation above makes the interpolation shell-safe. The subshell is
     -- detached from the pipe's stdout (</dev/null >/dev/null 2>&1) so it
     -- survives the parent sh exiting; real output goes to UP_LOG explicitly.
+    -- Record the background subshell's PID ($!) in the lock so a job that dies
+    -- without clearing it is reaped by clear_stale_lock (dead PID) instead of
+    -- wedging the UI until the TTL.
     local cmd = "touch " .. UP_LOCK .. "; "
         .. "(timeout 90 " .. BIN .. " up" .. args .. " > " .. UP_LOG .. " 2>&1; "
         .. "echo \"[exit code: $?]\" >> " .. UP_LOG .. "; "
-        .. "rm -f " .. UP_LOCK .. ") </dev/null >/dev/null 2>&1 &"
+        .. "rm -f " .. UP_LOCK .. ") </dev/null >/dev/null 2>&1 & echo $! > " .. UP_LOCK
     local r = ngx.pipe.spawn({"sh", "-c", cmd})
     if r then r:stdout_read_all(); r:wait() end
 
@@ -342,6 +347,7 @@ function M.set_ssh(params)
     if not daemon_running() then
         return { err_code = -2, err_msg = "NetBird daemon is not running" }
     end
+    clear_stale_lock(UP_LOCK)
     if file_exists(UP_LOCK) then
         return { err_code = -3, err_msg = "Another operation is already in progress" }
     end
@@ -376,7 +382,9 @@ function M.set_ssh(params)
         .. "{ " .. cmd .. " ; } > " .. UP_LOG .. " 2>&1; "
         .. "echo \"[exit code: $?]\" >> " .. UP_LOG .. "; "
         .. "rm -f " .. UP_LOCK
-    local outer = "(" .. full .. ") </dev/null >/dev/null 2>&1 &"
+    -- Record the background subshell's PID ($!) in the lock so a dead job is
+    -- reaped by clear_stale_lock (dead PID) instead of wedging the UI.
+    local outer = "(" .. full .. ") </dev/null >/dev/null 2>&1 & echo $! > " .. UP_LOCK
     local r = ngx.pipe.spawn({"sh", "-c", outer})
     if r then r:stdout_read_all(); r:wait() end
 
@@ -406,6 +414,7 @@ end
     @out bool   in_progress connect attempt still running
 --]]
 function M.get_up_log()
+    clear_stale_lock(UP_LOCK)
     local res = { log = "", in_progress = file_exists(UP_LOCK) }
     local f = io.open(UP_LOG, "r")
     if f then
