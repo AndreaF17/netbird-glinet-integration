@@ -59,20 +59,7 @@ module.exports = (function () {
   }
 
   // -- shared styles -------------------------------------------------------
-  var CARD = {
-    background: '#fff', borderRadius: '8px', marginBottom: '16px',
-    boxShadow: '0 1px 4px rgba(0,0,0,0.08)', overflow: 'hidden'
-  };
-  var HEAD = {
-    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-    padding: '14px 18px', borderBottom: '1px solid #ebebf0',
-    fontSize: '15px', fontWeight: '600', color: '#303133'
-  };
-  var ROW = {
-    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-    padding: '12px 18px', borderBottom: '1px solid #f5f5f5',
-    minHeight: '46px', fontSize: '13px', color: '#303133'
-  };
+  // Buttons read fine on both themes (filled blue / transparent outline).
   var BTN = {
     padding: '5px 16px', borderRadius: '15px', border: '1px solid #5272f7',
     background: '#5272f7', color: '#fff', fontSize: '12px', cursor: 'pointer'
@@ -81,14 +68,77 @@ module.exports = (function () {
   var BTN_DANGER = Object.assign({}, BTN, {
     background: 'transparent', color: '#f56c6c', borderColor: '#f56c6c'
   });
-  var INPUT = {
-    width: '100%', boxSizing: 'border-box', padding: '8px 12px',
-    border: '1px solid #dcdfe6', borderRadius: '6px', fontSize: '13px',
-    color: '#303133', background: '#fff', outline: 'none'
-  };
-  var INPUT_DISABLED = Object.assign({}, INPUT, {
-    background: '#f5f6fa', color: '#a0a0a3', cursor: 'not-allowed'
-  });
+
+  // -- theme ---------------------------------------------------------------
+  // The OUI view loader injects no theme CSS into the view, so the GL theme
+  // (Default/Classic/Dark) never reaches these inline styles. Build a light
+  // and a dark palette and pick one by the effective background color the SPA
+  // paints around the view.
+  function buildTheme(dark) {
+    var text   = dark ? '#e5e6eb' : '#303133';
+    var border = dark ? '#3a3d54' : '#ebebf0';
+    var borderSoft = dark ? '#33364c' : '#f5f5f5';
+    var INPUT = {
+      width: '100%', boxSizing: 'border-box', padding: '8px 12px',
+      border: '1px solid ' + (dark ? '#3f4258' : '#dcdfe6'), borderRadius: '6px',
+      fontSize: '13px', color: text,
+      background: dark ? '#1e2030' : '#fff', outline: 'none'
+    };
+    return {
+      text: text,
+      label: dark ? '#b9bcc9' : '#606266',
+      muted: dark ? '#7e8296' : '#a0a0a3',
+      disabledText: dark ? '#5b5e73' : '#c0c4cc',
+      borderSoft: borderSoft,
+      toggleOff: dark ? '#4a4d66' : '#a0a0a3',
+      warnBg: dark ? '#3a2f1d' : '#fdf3e7',
+      warnText: dark ? '#e8c88a' : '#856404',
+      panelBnrBg: dark ? '#232a45' : '#eef3ff',
+      panelHint: dark ? '#9aa5c4' : '#5a6b8c',
+      doneBg: dark ? '#1c332f' : '#eafaf6',
+      footer: dark ? '#565870' : '#ccc',
+      CARD: {
+        background: dark ? '#26283a' : '#fff', borderRadius: '8px',
+        marginBottom: '16px', overflow: 'hidden',
+        boxShadow: dark ? '0 1px 4px rgba(0,0,0,0.35)' : '0 1px 4px rgba(0,0,0,0.08)'
+      },
+      HEAD: {
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '14px 18px', borderBottom: '1px solid ' + border,
+        fontSize: '15px', fontWeight: '600', color: text
+      },
+      ROW: {
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '12px 18px', borderBottom: '1px solid ' + borderSoft,
+        minHeight: '46px', fontSize: '13px', color: text
+      },
+      INPUT: INPUT,
+      INPUT_DISABLED: Object.assign({}, INPUT, {
+        background: dark ? '#2a2c40' : '#f5f6fa',
+        color: dark ? '#6b6e82' : '#a0a0a3', cursor: 'not-allowed'
+      })
+    };
+  }
+  var THEME_LIGHT = buildTheme(false);
+  var THEME_DARK = buildTheme(true);
+
+  // Walk up from the view until an opaque background is found and classify it
+  // by luminance. Works across GL firmware/theme variants without knowing
+  // which class or attribute the SPA uses to switch themes.
+  function isDarkAround(el) {
+    try {
+      var node = el;
+      while (node && node.nodeType === 1) {
+        var bg = window.getComputedStyle(node).backgroundColor || '';
+        var m = bg.match(/rgba?\((\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?\)/);
+        if (m && (m[4] === undefined || parseFloat(m[4]) > 0.1)) {
+          return (0.2126 * m[1] + 0.7152 * m[2] + 0.0722 * m[3]) < 128;
+        }
+        node = node.parentNode;
+      }
+    } catch (e) {}
+    return false;
+  }
 
   function disabled(style) {
     return Object.assign({}, style, { opacity: '0.45', cursor: 'not-allowed' });
@@ -104,6 +154,7 @@ module.exports = (function () {
     data: function () {
       return {
         loading: true,
+        isDark: false,   // follow the surrounding GL admin theme
         installed: false,
         enabled: false,
         running: false,
@@ -155,11 +206,33 @@ module.exports = (function () {
       this.checkPanelUpdate();   // this panel's own release (via the browser)
     },
 
+    mounted: function () {
+      var self = this;
+      var apply = function () {
+        self.isDark = isDarkAround(self.$el && self.$el.parentNode);
+      };
+      apply();
+      this.themeRecheck = apply;
+      // The SPA switches themes by mutating the document root/body; observe
+      // both so the palette follows instantly. The status tick re-checks as
+      // a fallback for firmwares that swap stylesheets instead.
+      if (window.MutationObserver) {
+        this.themeObserver = new MutationObserver(apply);
+        this.themeObserver.observe(document.documentElement,
+          { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+        if (document.body) {
+          this.themeObserver.observe(document.body,
+            { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+        }
+      }
+    },
+
     beforeDestroy: function () {
       if (this.timer) clearInterval(this.timer);
       if (this.logTimer) clearInterval(this.logTimer);
       if (this.updLogTimer) clearInterval(this.updLogTimer);
       if (this.panelUpdLogTimer) clearInterval(this.panelUpdLogTimer);
+      if (this.themeObserver) this.themeObserver.disconnect();
     },
 
     computed: {
@@ -199,6 +272,7 @@ module.exports = (function () {
 
       fetchStatus: function () {
         var self = this;
+        if (self.themeRecheck) self.themeRecheck();
         callRpc('get_status', {}).then(function (res) {
           res = res || {};
           if (res.err_code) return;
@@ -505,6 +579,7 @@ module.exports = (function () {
 
     render: function (h) {
       var self = this;
+      var TH = self.isDark ? THEME_DARK : THEME_LIGHT;
 
       if (self.loading) {
         return h('div', { style: { padding: '40px', textAlign: 'center', color: '#999' } },
@@ -512,8 +587,8 @@ module.exports = (function () {
       }
 
       function row(label, children) {
-        return h('div', { style: ROW }, [
-          h('span', { style: { color: '#606266' } }, label),
+        return h('div', { style: TH.ROW }, [
+          h('span', { style: { color: TH.label } }, label),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, children)
         ]);
       }
@@ -536,7 +611,7 @@ module.exports = (function () {
             position: 'relative', display: 'inline-block', width: '36px',
             height: '22px', borderRadius: '11px',
             cursor: isDisabled ? 'not-allowed' : 'pointer',
-            background: on ? '#00c8b5' : '#a0a0a3',
+            background: on ? '#00c8b5' : TH.toggleOff,
             opacity: isDisabled ? '0.5' : '1', transition: 'background 0.2s'
           },
           on: { click: function () { if (!isDisabled) onClick(); } }
@@ -554,15 +629,15 @@ module.exports = (function () {
       // Collapsible card header: title + caret, click toggles.
       function collapsibleHead(title, extra, open, onToggle) {
         return h('div', {
-          style: Object.assign({}, HEAD, { cursor: 'pointer', userSelect: 'none' }),
+          style: Object.assign({}, TH.HEAD, { cursor: 'pointer', userSelect: 'none' }),
           on: { click: onToggle }
         }, [
           h('span', {}, title + (extra ? ' ' : '')),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, [
-            extra ? h('span', { style: { fontSize: '12px', fontWeight: '400', color: '#a0a0a3' } }, extra) : null,
+            extra ? h('span', { style: { fontSize: '12px', fontWeight: '400', color: TH.muted } }, extra) : null,
             h('span', {
               style: {
-                display: 'inline-block', fontSize: '12px', color: '#a0a0a3',
+                display: 'inline-block', fontSize: '12px', color: TH.muted,
                 transition: 'transform 0.15s',
                 transform: open ? 'rotate(90deg)' : 'rotate(0deg)'
               }
@@ -595,10 +670,10 @@ module.exports = (function () {
         : self.running ? dot('warn', self.upInProgress ? 'Connecting…' : 'Disconnected')
         : dot('err', 'Daemon stopped');
 
-      var statusCard = h('div', { style: CARD }, [
-        h('div', { style: HEAD }, [
+      var statusCard = h('div', { style: TH.CARD }, [
+        h('div', { style: TH.HEAD }, [
           h('span', {}, 'NetBird'),
-          h('span', { style: { fontSize: '11px', fontWeight: '400', color: '#a0a0a3' } },
+          h('span', { style: { fontSize: '11px', fontWeight: '400', color: TH.muted } },
             'netbird ' + self.version + ' · pkg v' + VERSION)
         ]),
         row('Daemon', [].concat(
@@ -608,17 +683,17 @@ module.exports = (function () {
         row('Management connection', mgmtState),
         h('div', {
           style: {
-            padding: '10px 18px', borderBottom: '1px solid #f5f5f5',
-            fontSize: '13px', color: '#303133'
+            padding: '10px 18px', borderBottom: '1px solid ' + TH.borderSoft,
+            fontSize: '13px', color: TH.text
           }
         }, [
           h('div', {
             style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: '26px' }
           }, [
-            h('span', { style: { color: '#606266' } }, 'Allow NetBird SSH access'),
+            h('span', { style: { color: TH.label } }, 'Allow NetBird SSH access'),
             sshToggle
           ]),
-          h('div', { style: { fontSize: '11px', color: '#a0a0a3', lineHeight: '1.4', marginTop: '4px' } },
+          h('div', { style: { fontSize: '11px', color: TH.muted, lineHeight: '1.4', marginTop: '4px' } },
             'Toggling reconnects NetBird briefly. Access also needs the peer\'s SSH switch in the '
             + 'NetBird dashboard and an access policy using the "NetBird SSH" protocol.'),
           // The toggle only controls the router side; the server actually runs
@@ -627,7 +702,7 @@ module.exports = (function () {
             ? h('div', {
                 style: {
                   fontSize: '11px', color: '#e6a23c', lineHeight: '1.4', marginTop: '6px',
-                  padding: '6px 8px', background: '#fdf3e7', borderRadius: '4px'
+                  padding: '6px 8px', background: TH.warnBg, borderRadius: '4px'
                 }
               }, 'SSH is allowed on the router, but the server is not running yet. In the NetBird '
                  + 'dashboard open Peers → this router and turn on SSH, and make sure a policy with '
@@ -636,10 +711,10 @@ module.exports = (function () {
           h('div', {
             style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: '26px', marginTop: '10px' }
           }, [
-            h('span', { style: { color: self.sshEnabled ? '#606266' : '#c0c4cc' } }, 'Allow root login'),
+            h('span', { style: { color: self.sshEnabled ? TH.label : TH.disabledText } }, 'Allow root login'),
             sshRootToggle
           ]),
-          h('div', { style: { fontSize: '11px', color: '#a0a0a3', lineHeight: '1.4', marginTop: '4px' } },
+          h('div', { style: { fontSize: '11px', color: TH.muted, lineHeight: '1.4', marginTop: '4px' } },
             'Lets you SSH in as root (the router\'s only user). Needs the SSH server on above. With a '
             + '"Limited Access" SSH policy, also authorize your user group for root in the policy\'s '
             + 'settings. Sessions authenticate with your NetBird login (JWT), so the router\'s clock '
@@ -658,10 +733,10 @@ module.exports = (function () {
         if (self.updating) {
           updRight = h('span', { style: { fontSize: '12px', color: '#5272f7' } }, 'Updating…');
         } else if (!self.updChecked || self.updChecking) {
-          updRight = h('span', { style: { fontSize: '12px', color: '#a0a0a3' } }, 'Checking…');
+          updRight = h('span', { style: { fontSize: '12px', color: TH.muted } }, 'Checking…');
         } else if (!self.updOk) {
           updRight = h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, [
-            h('span', { style: { fontSize: '12px', color: '#a0a0a3' } }, 'Check unavailable'),
+            h('span', { style: { fontSize: '12px', color: TH.muted } }, 'Check unavailable'),
             h('button', { style: BTN_PLAIN, on: { click: self.checkUpdate } }, 'Retry')
           ]);
         } else if (self.updAvailable) {
@@ -686,7 +761,7 @@ module.exports = (function () {
         }
 
         var updChildren = [
-          h('div', { style: HEAD }, [
+          h('div', { style: TH.HEAD }, [
             h('span', {}, 'NetBird update'),
             updRight
           ])
@@ -706,12 +781,12 @@ module.exports = (function () {
         }
         if (self.updating) {
           updChildren.push(h('div', {
-            style: { fontSize: '12px', color: '#a0a0a3', padding: '0 18px 14px', lineHeight: '1.5' }
+            style: { fontSize: '12px', color: TH.muted, padding: '0 18px 14px', lineHeight: '1.5' }
           }, 'Downloading the official netbird binary and swapping it in. The daemon restarts and '
              + 'reconnects automatically — your enrollment is preserved. If the new version fails '
              + 'to reconnect, the previous one is restored automatically.'));
         }
-        updateCard = h('div', { style: CARD }, updChildren);
+        updateCard = h('div', { style: TH.CARD }, updChildren);
       }
 
       // ---- connection card (collapsible) ----
@@ -731,10 +806,10 @@ module.exports = (function () {
 
       var connBody = !self.connOpen ? [] : [
         h('div', { style: { padding: '10px 18px' } }, [
-          h('div', { style: { fontSize: '12px', color: '#606266', marginBottom: '6px' } },
+          h('div', { style: { fontSize: '12px', color: TH.label, marginBottom: '6px' } },
             'Setup key (leave empty for browser SSO login)'),
           h('input', {
-            style: self.formLocked ? INPUT_DISABLED : INPUT,
+            style: self.formLocked ? TH.INPUT_DISABLED : TH.INPUT,
             attrs: {
               type: 'password',
               placeholder: 'XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX',
@@ -746,10 +821,10 @@ module.exports = (function () {
           })
         ]),
         h('div', { style: { padding: '10px 18px' } }, [
-          h('div', { style: { fontSize: '12px', color: '#606266', marginBottom: '6px' } },
+          h('div', { style: { fontSize: '12px', color: TH.label, marginBottom: '6px' } },
             'Management URL (leave empty for https://api.netbird.io)'),
           h('input', {
-            style: self.formLocked ? INPUT_DISABLED : INPUT,
+            style: self.formLocked ? TH.INPUT_DISABLED : TH.INPUT,
             attrs: {
               type: 'text',
               placeholder: 'https://netbird.example.com',
@@ -781,10 +856,10 @@ module.exports = (function () {
           }, self.msg) : null
         ]),
         self.mgmtConnected ? h('div', {
-          style: { fontSize: '12px', color: '#a0a0a3', padding: '0 18px 12px', lineHeight: '1.5' }
+          style: { fontSize: '12px', color: TH.muted, padding: '0 18px 12px', lineHeight: '1.5' }
         }, 'Connected — disconnect first to enroll with a different setup key or management server.')
         : h('div', {
-          style: { fontSize: '12px', color: '#a0a0a3', padding: '0 18px 12px', lineHeight: '1.5' }
+          style: { fontSize: '12px', color: TH.muted, padding: '0 18px 12px', lineHeight: '1.5' }
         }, 'With a setup key the router enrolls headlessly. Without one, a login URL appears '
            + 'in the output below — open it in your browser to authorize this router.'),
         logChildren ? h('pre', {
@@ -797,7 +872,7 @@ module.exports = (function () {
         }, logChildren) : null
       ];
 
-      var connectCard = h('div', { style: CARD }, [
+      var connectCard = h('div', { style: TH.CARD }, [
         collapsibleHead('Connection',
           self.mgmtConnected ? 'connected' : null,
           self.connOpen,
@@ -812,22 +887,22 @@ module.exports = (function () {
         if (self.peersOpen) {
           if (self.peers.details.length === 0) {
             peersBody = [h('div', {
-              style: { padding: '14px 18px', fontSize: '12px', color: '#a0a0a3' }
+              style: { padding: '14px 18px', fontSize: '12px', color: TH.muted }
             }, 'No peers in this network yet.')];
           } else {
             var th = function (t) {
               return h('th', {
                 style: {
-                  textAlign: 'left', padding: '8px 18px', borderBottom: '1px solid #f5f5f5',
-                  color: '#909399', fontSize: '11px', textTransform: 'uppercase', fontWeight: '400'
+                  textAlign: 'left', padding: '8px 18px', borderBottom: '1px solid ' + TH.borderSoft,
+                  color: TH.muted, fontSize: '11px', textTransform: 'uppercase', fontWeight: '400'
                 }
               }, t);
             };
             var td = function (children) {
               return h('td', {
                 style: {
-                  textAlign: 'left', padding: '8px 18px', borderBottom: '1px solid #f5f5f5',
-                  color: '#606266', fontSize: '12px'
+                  textAlign: 'left', padding: '8px 18px', borderBottom: '1px solid ' + TH.borderSoft,
+                  color: TH.label, fontSize: '12px'
                 }
               }, children);
             };
@@ -846,7 +921,7 @@ module.exports = (function () {
               [h('tr', {}, [th('Peer'), th('NetBird IP'), th('Status')])].concat(rows))];
           }
         }
-        peersCard = h('div', { style: CARD }, [
+        peersCard = h('div', { style: TH.CARD }, [
           collapsibleHead('Peers', peersExtra, self.peersOpen,
             function () { self.peersOpen = !self.peersOpen; })
         ].concat(peersBody));
@@ -855,8 +930,8 @@ module.exports = (function () {
       var banner = !self.installed ? h('div', {
         style: {
           marginBottom: '16px', padding: '12px 16px', borderRadius: '8px',
-          background: '#fdf3e7', borderLeft: '3px solid #e6a23c',
-          color: '#856404', fontSize: '13px', lineHeight: '1.5'
+          background: TH.warnBg, borderLeft: '3px solid #e6a23c',
+          color: TH.warnText, fontSize: '13px', lineHeight: '1.5'
         }
       }, 'The netbird binary was not found at /usr/sbin/netbird. Reinstall the package.') : null;
 
@@ -865,7 +940,7 @@ module.exports = (function () {
       // on the router, shows progress, then asks to reload for the new view.
       var panelBannerStyle = {
         marginBottom: '16px', padding: '12px 16px', borderRadius: '8px',
-        background: '#eef3ff', borderLeft: '3px solid #5272f7', color: '#303133',
+        background: TH.panelBnrBg, borderLeft: '3px solid #5272f7', color: TH.text,
         fontSize: '13px', lineHeight: '1.5'
       };
       var panelLogStyle = {
@@ -879,7 +954,7 @@ module.exports = (function () {
         panelBanner = h('div', {
           style: Object.assign({}, panelBannerStyle, {
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            gap: '12px', flexWrap: 'wrap', background: '#eafaf6', borderLeftColor: '#00c8b5'
+            gap: '12px', flexWrap: 'wrap', background: TH.doneBg, borderLeftColor: '#00c8b5'
           })
         }, [
           h('span', {}, 'Panel updated. Reload this page to load the new version.'),
@@ -923,7 +998,7 @@ module.exports = (function () {
         ];
         if (self.panelConfirm && !self.panelUpdating) {
           pbChildren.push(h('div', {
-            style: { fontSize: '12px', color: '#5a6b8c', marginTop: '8px', lineHeight: '1.5' }
+            style: { fontSize: '12px', color: TH.panelHint, marginTop: '8px', lineHeight: '1.5' }
           }, 'This downloads and installs v' + self.panelLatest + ' with opkg and restarts the panel '
              + '(the VPN reconnects automatically). Continue?'));
         }
@@ -932,7 +1007,7 @@ module.exports = (function () {
         }
         if (self.panelUpdating) {
           pbChildren.push(h('div', {
-            style: { fontSize: '12px', color: '#5a6b8c', marginTop: '8px', lineHeight: '1.5' }
+            style: { fontSize: '12px', color: TH.panelHint, marginTop: '8px', lineHeight: '1.5' }
           }, 'Downloading the new panel .ipk to /tmp and installing it with opkg. The web UI restarts '
              + 'during install, so this page may briefly disconnect — it finishes on its own.'));
         }
@@ -946,7 +1021,7 @@ module.exports = (function () {
         updateCard,
         connectCard,
         peersCard,
-        h('div', { style: { textAlign: 'center', fontSize: '11px', color: '#ccc', marginTop: '8px' } },
+        h('div', { style: { textAlign: 'center', fontSize: '11px', color: TH.footer, marginTop: '8px' } },
           'NetBird for GL-X2000 · netbird.io · auto-refreshes every 4s')
       ]);
     }
