@@ -184,37 +184,36 @@ local function netbird_status()
     return nil
 end
 
--- Helper: is the embedded NetBird SSH server actually running?
--- Prefer the LIVE daemon state from `netbird status` (its
--- "SSH Server: Enabled/Disabled" line) — that's what the user sees on the CLI
--- and what actually governs SSH. The persistent config's ServerSSHAllowed can
--- be stale (left true by an enable that never took effect on the daemon), so
--- it's only a fallback when the status line can't be read (e.g. daemon down).
-local function ssh_server_enabled()
-    if daemon_running() then
-        local out = exec("timeout 10 " .. BIN .. " status 2>/dev/null")
-        if out then
-            local v = out:match("SSH Server:%s*(%a+)")
-            if v then return v:lower() == "enabled" end
-        end
-    end
-    -- Fallback: persistent client config.
+-- Helper: JSON true/false/null -> true/false/nil (cjson decodes JSON null to
+-- cjson.null, which is neither nil nor false).
+local function cfg_bool(v)
+    if v == true then return true end
+    if v == false then return false end
+    return nil
+end
+
+-- Client-side SSH intent from the persistent client config (netbird >= 0.60
+-- persists ServerSSHAllowed and EnableSSHRoot there). This is what the panel
+-- toggles control. The SSH server only actually RUNS when the dashboard's
+-- per-peer SSH switch is also on (management pushes it), so the live
+-- "SSH Server:" state is reported separately (ssh_active in get_status).
+local function client_ssh_config()   -- -> allowed|nil, root|nil
     local f = io.open("/etc/netbird/config.json", "r")
-    if not f then return false end
+    if not f then return nil, nil end
     local data = f:read("*a")
     f:close()
     local ok, cfg = pcall(cjson.decode, data)
-    if ok and type(cfg) == "table" then
-        return cfg.ServerSSHAllowed == true
-    end
-    return false
+    if not ok or type(cfg) ~= "table" then return nil, nil end
+    return cfg_bool(cfg.ServerSSHAllowed), cfg_bool(cfg.EnableSSHRoot)
 end
 
--- Helper: panel-tracked "allow root login" preference. netbird exposes no
--- status line for --enable-ssh-root, so the panel records the value it last
--- applied (in /etc/netbird, which persists across upgrades) and reads it back
--- for the toggle. Authoritative only for panel-driven changes.
+-- Helper: "allow root login" state. The client config's EnableSSHRoot is
+-- authoritative on netbird >= 0.60; the panel-tracked file (the value the
+-- panel last applied) is only the fallback for older clients that don't
+-- persist the flag.
 local function ssh_root_enabled()
+    local _, root = client_ssh_config()
+    if root ~= nil then return root end
     local f = io.open(SSH_ROOT_STATE, "r")
     if not f then return false end
     local v = f:read("*l")
@@ -245,6 +244,10 @@ end
     @out string version         installed netbird version
     @out object status          parsed `netbird status --json` (null when daemon down)
     @out bool   up_in_progress  a `netbird up` launched from this UI is still running
+    @out bool   ssh_enabled     client-side "allow SSH server" setting (the toggle)
+    @out bool   ?ssh_active     SSH server actually running (needs the dashboard
+                                per-peer SSH switch too); absent when unknown
+    @out bool   ssh_root_enabled  client-side root-login setting
 --]]
 function M.get_status()
     local res = {}
@@ -254,12 +257,20 @@ function M.get_status()
     res.version = get_version()
     clear_stale_lock(UP_LOCK)
     res.up_in_progress = file_exists(UP_LOCK)
-    res.ssh_enabled = ssh_server_enabled()
+    local ssh_allowed = client_ssh_config()
+    res.ssh_enabled = ssh_allowed == true
     res.ssh_root_enabled = ssh_root_enabled()
 
     local status = netbird_status()
     if status then
         res.status = status
+        -- Effective server state (netbird >= 0.60 reports it in the JSON).
+        -- ssh_enabled true + ssh_active false means the dashboard's per-peer
+        -- SSH switch (or the policy) is still missing — surfaced in the UI.
+        local srv = status.sshServer
+        if type(srv) == "table" and cfg_bool(srv.enabled) ~= nil then
+            res.ssh_active = srv.enabled == true
+        end
     end
 
     return res
@@ -361,15 +372,20 @@ function M.set_ssh(params)
     -- reconnect, so every change does `netbird down` then `netbird up` with the
     -- full flag set. Passing both flags every time keeps them from resetting
     -- each other; a bare `up` while connected applies nothing (issue #2816).
-    local cmd
+    local flags
     if params.enabled then
-        local root_flag = want_root and "--enable-ssh-root" or "--enable-ssh-root=false"
-        cmd = "timeout 15 " .. BIN .. " down; "
-            .. "timeout 90 " .. BIN .. " up --allow-server-ssh " .. root_flag
+        flags = "--allow-server-ssh "
+            .. (want_root and "--enable-ssh-root" or "--enable-ssh-root=false")
     else
-        cmd = "timeout 15 " .. BIN .. " down; "
-            .. "timeout 90 " .. BIN .. " up --allow-server-ssh=false"
+        flags = "--allow-server-ssh=false"
     end
+    -- Never leave a remote router disconnected: the flagged `up` follows a
+    -- `down`, so if it fails (unknown flag on an older client, transient
+    -- error) a bare `up` restores the previous connection.
+    local cmd = "timeout 15 " .. BIN .. " down; "
+        .. "if ! timeout 90 " .. BIN .. " up " .. flags .. "; then "
+        .. "echo '[applying SSH flags failed; restoring the connection]'; "
+        .. "timeout 90 " .. BIN .. " up; fi"
 
     -- Record the root preference for the panel toggle's state.
     local rf = io.open(SSH_ROOT_STATE, "w")

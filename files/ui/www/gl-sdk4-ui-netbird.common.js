@@ -110,7 +110,8 @@ module.exports = (function () {
         version: 'unknown',
         status: null,
         upInProgress: false,
-        sshEnabled: false,
+        sshEnabled: false,      // client-side "allow SSH server" (the toggle)
+        sshActive: null,        // SSH server actually running (null = unknown)
         sshRootEnabled: false,
         upLog: '',
         setupKey: '',
@@ -208,6 +209,8 @@ module.exports = (function () {
           self.status = res.status || null;
           self.upInProgress = !!res.up_in_progress;
           self.sshEnabled = !!res.ssh_enabled;
+          self.sshActive = (res.ssh_active === undefined || res.ssh_active === null)
+            ? null : !!res.ssh_active;
           self.sshRootEnabled = !!res.ssh_root_enabled;
           self.loading = false;
           if (self.upInProgress) self.startLogPolling();
@@ -616,7 +619,20 @@ module.exports = (function () {
             sshToggle
           ]),
           h('div', { style: { fontSize: '11px', color: '#a0a0a3', lineHeight: '1.4', marginTop: '4px' } },
-            'Toggling reconnects NetBird briefly. Access also needs a "NetBird SSH" policy in your NetBird dashboard.'),
+            'Toggling reconnects NetBird briefly. Access also needs the peer\'s SSH switch in the '
+            + 'NetBird dashboard and an access policy using the "NetBird SSH" protocol.'),
+          // The toggle only controls the router side; the server actually runs
+          // once the dashboard's per-peer SSH switch + policy are in place.
+          (self.sshEnabled && self.sshActive === false && self.running && self.mgmtConnected)
+            ? h('div', {
+                style: {
+                  fontSize: '11px', color: '#e6a23c', lineHeight: '1.4', marginTop: '6px',
+                  padding: '6px 8px', background: '#fdf3e7', borderRadius: '4px'
+                }
+              }, 'SSH is allowed on the router, but the server is not running yet. In the NetBird '
+                 + 'dashboard open Peers → this router and turn on SSH, and make sure a policy with '
+                 + 'the "NetBird SSH" protocol (or TCP port 22) covers it.')
+            : null,
           h('div', {
             style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: '26px', marginTop: '10px' }
           }, [
@@ -624,7 +640,10 @@ module.exports = (function () {
             sshRootToggle
           ]),
           h('div', { style: { fontSize: '11px', color: '#a0a0a3', lineHeight: '1.4', marginTop: '4px' } },
-            'Lets you SSH in as root (the router\'s admin user) from the NetBird console. Needs the SSH server on above, plus a "NetBird SSH" policy that authorizes root in your dashboard.')
+            'Lets you SSH in as root (the router\'s only user). Needs the SSH server on above. With a '
+            + '"Limited Access" SSH policy, also authorize your user group for root in the policy\'s '
+            + 'settings. Sessions authenticate with your NetBird login (JWT), so the router\'s clock '
+            + 'must be correct.')
         ]),
         row('NetBird IP', [h('span', {}, self.running ? self.nbIp : '-')]),
         row('Hostname (FQDN)', [h('span', {}, self.running ? self.nbFqdn : '-')])
