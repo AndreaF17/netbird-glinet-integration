@@ -880,9 +880,41 @@ module.exports = (function () {
       ].concat(connBody));
 
       // ---- peers card (collapsible) ----
+      // Per-peer link type: netbird >= 0.60 reports connectionType
+      // ("P2P"/"Relayed"); older clients exposed a boolean `relayed`.
+      function linkType(p) {
+        var t = String(g(p, 'connectionType') || '').toLowerCase();
+        if (t.indexOf('relay') === 0) return 'relay';
+        if (t === 'p2p') return 'p2p';
+        var r = g(p, 'relayed');
+        if (r === true) return 'relay';
+        if (r === false) return 'p2p';
+        return null;
+      }
+      function linkBadge(kind) {
+        var isP2P = kind === 'p2p';
+        // rgba backgrounds read correctly on both themes.
+        return h('span', {
+          style: {
+            fontSize: '10px', fontWeight: '600', padding: '2px 8px',
+            borderRadius: '9px', letterSpacing: '0.3px',
+            color: isP2P ? '#00c8b5' : '#e6a23c',
+            background: isP2P ? 'rgba(0,200,181,0.13)' : 'rgba(230,162,60,0.15)'
+          }
+        }, isP2P ? 'P2P' : 'Relay');
+      }
+
       var peersCard = null;
       if (self.running) {
+        var nP2P = 0, nRelay = 0;
+        self.peers.details.forEach(function (p) {
+          if (String(g(p, 'status', 'connectionStatus') || '').toLowerCase() !== 'connected') return;
+          var k = linkType(p);
+          if (k === 'p2p') nP2P++;
+          else if (k === 'relay') nRelay++;
+        });
         var peersExtra = self.peers.connected + ' / ' + self.peers.total + ' connected';
+        if (nP2P + nRelay > 0) peersExtra += ' · ' + nP2P + ' P2P / ' + nRelay + ' relay';
         var peersBody = [];
         if (self.peersOpen) {
           if (self.peers.details.length === 0) {
@@ -911,14 +943,17 @@ module.exports = (function () {
               // netbird's transient states (Connecting…) read as down.
               var ok = String(g(p, 'status', 'connectionStatus') || '')
                 .toLowerCase() === 'connected';
+              var k = linkType(p);
               return h('tr', {}, [
                 td([g(p, 'fqdn', 'hostname') || '?']),
                 td([g(p, 'netbirdIp', 'netbirdIP', 'ip') || '?']),
+                td([ok && k ? linkBadge(k)
+                  : h('span', { style: { color: TH.disabledText } }, '—')]),
                 td(dot(ok ? 'ok' : 'err', ok ? 'Connected' : 'Disconnected'))
               ]);
             });
             peersBody = [h('table', { style: { width: '100%', borderCollapse: 'collapse' } },
-              [h('tr', {}, [th('Peer'), th('NetBird IP'), th('Status')])].concat(rows))];
+              [h('tr', {}, [th('Peer'), th('NetBird IP'), th('Link'), th('Status')])].concat(rows))];
           }
         }
         peersCard = h('div', { style: TH.CARD }, [
