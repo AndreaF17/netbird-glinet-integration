@@ -689,7 +689,8 @@ module.exports = (function () {
           updChildren.push(h('div', {
             style: { fontSize: '12px', color: '#a0a0a3', padding: '0 18px 14px', lineHeight: '1.5' }
           }, 'Downloading the official netbird binary and swapping it in. The daemon restarts and '
-             + 'reconnects automatically — your enrollment is preserved.'));
+             + 'reconnects automatically — your enrollment is preserved. If the new version fails '
+             + 'to reconnect, the previous one is restored automatically.'));
         }
         updateCard = h('div', { style: CARD }, updChildren);
       }

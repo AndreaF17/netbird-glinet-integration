@@ -25,8 +25,16 @@ UPDATER=/usr/libexec/netbird/netbird-self-update.sh
 BIN_GZ=/usr/libexec/netbird/netbird.gz
 if [ -x "$UPDATER" ] || [ -f "$UPDATER" ]; then
     if [ -f "$BIN_GZ" ]; then
-        echo "netbird: client already installed; updating only if a newer version exists..."
-        sh "$UPDATER" run >/dev/null 2>&1 || true
+        if [ "${PKG_UPGRADE:-0}" = "1" ]; then
+            # Panel upgrade with the client already on flash: do NOT piggy-back
+            # a netbird binary update -- it restarts the daemon (dropping the
+            # tunnel this very upgrade may be riding at a remote site). The
+            # panel's update card drives binary updates explicitly instead.
+            echo "netbird: client present; skipping binary update during panel upgrade."
+        else
+            echo "netbird: client already installed; updating only if a newer version exists..."
+            sh "$UPDATER" run >/dev/null 2>&1 || true
+        fi
     else
         echo "netbird: downloading the official client from upstream..."
         sh "$UPDATER" run >/dev/null 2>&1 || \

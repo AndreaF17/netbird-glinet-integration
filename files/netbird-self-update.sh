@@ -32,6 +32,10 @@ BIN_GZ="${LIBEXEC}/netbird.gz"          # present in the compressed (default) la
 PLAIN_BIN="/usr/sbin/netbird"           # the wrapper in compressed layout; the binary in plain
 VERSION_FILE="${LIBEXEC}/netbird.version"
 RUNTIME_DIR="/tmp/netbird-runtime"
+# The pre-update binary is parked here during the post-restart health check
+# so a failed update can be rolled back. It must live OUTSIDE RUNTIME_DIR:
+# the init's stop_service wipes that dir on every restart.
+PREV_DIR="/tmp/netbird-prev"
 
 LOG="/tmp/netbird-update.log"
 CACHE="/tmp/netbird-update-check.json"
@@ -60,6 +64,15 @@ http_download() {   # url dest  (follows the redirect to objects.githubuserconte
         wget -qO "$2" -T 300 "$1"
     fi
 }
+http_redirect() {   # url -> its Location header (no redirect following, no body)
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSI --connect-timeout 15 --max-time 30 -A "$UA" "$1" 2>/dev/null \
+            | sed -n 's/^[Ll]ocation: *//p' | tr -d '\r' | head -n1
+    else
+        wget -S --spider -T 30 "$1" 2>&1 \
+            | sed -n 's/^ *[Ll]ocation: *//p' | tr -d '\r' | head -n1
+    fi
+}
 
 # Installed netbird version. Prefer the state file (fast); fall back to asking
 # the binary (slow with the compressed layout — it must extract first).
@@ -74,13 +87,46 @@ installed_version() {
 }
 
 # Latest netbird version + release page. Emits: <version>\t<html_url>
+# Primary source is the API; when that fails (the unauthenticated GitHub API
+# allows 60 req/h per IP -- easily exhausted behind CGNAT LTE), fall back to
+# the /releases/latest web URL, whose 302 Location carries the tag and has no
+# such quota.
 resolve_latest() {
-    json="$(http_get "$API")" || return 1
-    [ -n "$json" ] || return 1
-    ver="$(printf '%s' "$json" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)"
-    html="$(printf '%s' "$json" | sed -n 's/.*"html_url": *"\([^"]*releases\/tag[^"]*\)".*/\1/p' | head -n1)"
+    ver=""; html=""
+    if json="$(http_get "$API")" && [ -n "$json" ]; then
+        ver="$(printf '%s' "$json" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)"
+        html="$(printf '%s' "$json" | sed -n 's/.*"html_url": *"\([^"]*releases\/tag[^"]*\)".*/\1/p' | head -n1)"
+    fi
+    if [ -z "$ver" ] || [ "$ver" = "null" ]; then
+        html="$(http_redirect "https://github.com/${REPO}/releases/latest")" || html=""
+        ver="$(printf '%s' "$html" | sed -n 's/.*\/releases\/tag\/v\{0,1\}\([^/]*\)$/\1/p')"
+    fi
     [ -n "$ver" ] && [ "$ver" != "null" ] || return 1
     printf '%s\t%s\n' "$ver" "$html"
+}
+
+# ---- post-restart health check ---------------------------------------------
+# A remote site must never be stranded by an update: after the daemon restart
+# the updater waits for the process (and, if there was one before the update,
+# the management session) to come back, and rolls back otherwise.
+HEALTH_WAIT="${NETBIRD_HEALTH_WAIT:-90}"    # seconds to wait for recovery
+HEALTH_POLL="${NETBIRD_HEALTH_POLL:-5}"
+
+daemon_running_now() { pgrep -f 'netbird[^ ]* service' >/dev/null 2>&1; }
+mgmt_connected_now() {
+    timeout 15 "$PLAIN_BIN" status 2>/dev/null | grep -qi 'management: *connected'
+}
+health_ok() {   # $1 = "connected" to also require the management session
+    waited=0
+    while [ "$waited" -lt "$HEALTH_WAIT" ]; do
+        if daemon_running_now; then
+            [ "$1" = "connected" ] || return 0
+            mgmt_connected_now && return 0
+        fi
+        sleep "$HEALTH_POLL"
+        waited=$((waited + HEALTH_POLL))
+    done
+    return 1
 }
 
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -160,6 +206,12 @@ cmd_run() {
         return 0
     fi
 
+    # Health target for the post-restart check: only demand a management
+    # session if there is one to lose right now (a deliberately-disconnected
+    # client must not trigger a rollback loop).
+    health_want=daemon
+    if mgmt_connected_now; then health_want=connected; fi
+
     tarball="netbird_${latest}_${ASSET_ARCH}.tar.gz"
     sums="netbird_${latest}_checksums.txt"
     base="https://github.com/${REPO}/releases/download/v${latest}"
@@ -228,7 +280,7 @@ cmd_run() {
             restore_payload
             return 1
         fi
-        rm -rf "$RUNTIME_DIR"          # force the wrapper to re-extract the new binary
+        compressed=1
     else
         log "Installing (plain layout) ..."
         if ! tar -xzf "$DL_DIR/$tarball" -C "$DL_DIR" netbird; then
@@ -238,6 +290,7 @@ cmd_run() {
         chmod 0755 "$DL_DIR/netbird"
         install -m 0755 "$DL_DIR/netbird" "${PLAIN_BIN}.new"
         mv "${PLAIN_BIN}.new" "$PLAIN_BIN"
+        compressed=0
     fi
 
     printf '%s\n' "$latest" > "$VERSION_FILE"
@@ -246,9 +299,66 @@ cmd_run() {
     # so the panel's next check shows "Up to date" immediately.
     rm -f "$CACHE"
 
+    # Park the old extracted binary for a possible rollback (compressed layout
+    # only; the plain layout has no spare copy to keep). The running daemon is
+    # unaffected by the rename -- its inode stays open until the restart.
+    rollback_ready=0
+    if [ "$compressed" = 1 ]; then
+        rm -rf "$PREV_DIR"
+        if [ -x "$RUNTIME_DIR/netbird" ]; then
+            mkdir -p "$PREV_DIR"
+            mv "$RUNTIME_DIR/netbird" "$PREV_DIR/netbird" 2>/dev/null && rollback_ready=1
+        fi
+        rm -rf "$RUNTIME_DIR"      # force the wrapper to re-extract the new binary
+    fi
+
     log "Restarting netbird daemon ..."
     "$INIT" restart >> "$LOG" 2>&1 || log "WARNING: daemon restart returned non-zero."
-    log "DONE: netbird updated to ${latest}."
+
+    if health_ok "$health_want"; then
+        rm -rf "$PREV_DIR"
+        log "Health check OK (${health_want})."
+        log "DONE: netbird updated to ${latest}."
+        return 0
+    fi
+    log "ERROR: netbird ${latest} did not come back healthy (wanted: ${health_want})."
+    if [ "$rollback_ready" != 1 ]; then
+        log "No previous binary kept; leaving ${latest} in place -- inspect manually."
+        return 1
+    fi
+
+    log "Rolling back to ${cur:-the previous version} ..."
+    "$INIT" stop >> "$LOG" 2>&1 || true
+    mkdir -p "$RUNTIME_DIR"
+    if ! mv "$PREV_DIR/netbird" "$RUNTIME_DIR/netbird"; then
+        log "ERROR: could not restore the previous binary; inspect manually."
+        return 1
+    fi
+    # Newer than the (new-version) netbird.gz, so the wrapper runs it as-is
+    # instead of re-extracting the failed payload.
+    touch "$RUNTIME_DIR/netbird"
+    if [ -n "$cur" ]; then printf '%s\n' "$cur" > "$VERSION_FILE"; fi
+    "$INIT" start >> "$LOG" 2>&1 || log "WARNING: daemon start returned non-zero."
+    # Persist the old payload back to flash so the rollback survives a reboot.
+    # Slow (gzip -9), but the daemon is already back up while this runs.
+    rm -f "$BIN_GZ"
+    if gzip -9n < "$RUNTIME_DIR/netbird" > "${BIN_GZ}.part" 2>/dev/null \
+            && mv "${BIN_GZ}.part" "$BIN_GZ"; then
+        log "Previous payload persisted back to flash."
+    else
+        rm -f "${BIN_GZ}.part"
+        log "WARNING: could not persist the previous payload to flash; avoid"
+        log "WARNING: rebooting until an update succeeds -- the daemon itself is fine."
+    fi
+    rm -rf "$PREV_DIR"
+    rm -f "$CACHE"
+    if health_ok "$health_want"; then
+        log "Rollback complete: netbird ${cur:-previous} is healthy again."
+    else
+        log "WARNING: rollback finished but the health check still fails; inspect manually."
+    fi
+    log "ERROR: update to ${latest} was rolled back."
+    return 1
 }
 
 case "${1:-check}" in

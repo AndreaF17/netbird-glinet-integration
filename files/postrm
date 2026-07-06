@@ -14,7 +14,7 @@
 
 # Drop NetBird's /tmp state: the binary extracted to RAM (compressed layout),
 # the connect/update logs and locks, and the self-update cache + scratch dir.
-rm -rf /tmp/netbird-runtime \
+rm -rf /tmp/netbird-runtime /tmp/netbird-prev \
        /tmp/netbird-up.log /tmp/netbird-up.lock \
        /tmp/netbird-update.log /tmp/netbird-update.lock \
        /tmp/netbird-update-check.json /tmp/netbird-update \

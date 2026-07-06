@@ -50,11 +50,32 @@ pkg_arch() {
     [ -n "$a" ] && printf '%s' "$a" || printf '%s' "aarch64_cortex-a53_neon-vfpv4"
 }
 
-# Latest release tag (without a leading v).
+# Latest release tag (without a leading v). API first; on failure (the
+# unauthenticated GitHub API is 60 req/h per IP -- easily exhausted behind
+# CGNAT LTE) fall back to the /releases/latest redirect, which has no quota.
 resolve_latest() {
-    json="$(http_get "$API")" || return 1
-    [ -n "$json" ] || return 1
-    printf '%s' "$json" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1
+    ver=""
+    if json="$(http_get "$API")" && [ -n "$json" ]; then
+        ver="$(printf '%s' "$json" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)"
+    fi
+    if [ -z "$ver" ] || [ "$ver" = "null" ]; then
+        if command -v curl >/dev/null 2>&1; then
+            loc="$(curl -fsSI --connect-timeout 15 --max-time 30 -A "$UA" \
+                "https://github.com/${REPO}/releases/latest" 2>/dev/null \
+                | sed -n 's/^[Ll]ocation: *//p' | tr -d '\r' | head -n1)"
+        else
+            loc="$(wget -S --spider -T 30 "https://github.com/${REPO}/releases/latest" 2>&1 \
+                | sed -n 's/^ *[Ll]ocation: *//p' | tr -d '\r' | head -n1)"
+        fi
+        ver="$(printf '%s' "$loc" | sed -n 's/.*\/releases\/tag\/v\{0,1\}\([^/]*\)$/\1/p')"
+    fi
+    [ -n "$ver" ] && [ "$ver" != "null" ] || return 1
+    printf '%s\n' "$ver"
+}
+
+# Free space (KB) on the filesystem opkg unpacks into. Empty when unparsable.
+overlay_free_kb() {
+    df -k /usr/lib 2>/dev/null | awk 'NR==2 {print $4}' | grep -E '^[0-9]+$' || true
 }
 
 cmd_run() {
@@ -75,6 +96,17 @@ cmd_run() {
     ipk="netbird_${ver}_${arch}.ipk"
     base="https://github.com/${REPO}/releases/download/v${ver}"
     log "Latest panel: v${ver} (${arch})"
+
+    # Pre-flight: a full overlay aborts opkg halfway through the transaction
+    # (observed in the field: package left "deinstall user installed") -- far
+    # worse than not starting. Only a conservative floor; skip if df output
+    # is unparsable.
+    free="$(overlay_free_kb)"
+    if [ -n "$free" ] && [ "$free" -lt 2048 ]; then
+        log "ERROR: only ${free} KB free on the overlay; ~2 MB is needed to"
+        log "ERROR: install safely. Free some space and retry. Aborting."
+        return 1
+    fi
 
     rm -rf "$DL_DIR"; mkdir -p "$DL_DIR"
     log "Downloading ${ipk} into /tmp ..."
@@ -101,13 +133,25 @@ cmd_run() {
     fi
 
     log "Installing ${ipk} with opkg ..."
-    if opkg install "$DL_DIR/$ipk" >> "$LOG" 2>&1; then
-        log "DONE: panel updated to v${ver}. Reload the panel page to load it."
-    else
+    # GL's own background opkg runs can hold the lock; that is transient, so
+    # retry a couple of times. Any other opkg failure is final.
+    RETRY_DELAY="${NETBIRD_OPKG_RETRY_DELAY:-15}"
+    tries=0
+    while :; do
+        if opkg install "$DL_DIR/$ipk" >> "$LOG" 2>&1; then
+            log "DONE: panel updated to v${ver}. Reload the panel page to load it."
+            break
+        fi
+        tries=$((tries + 1))
+        if [ "$tries" -lt 3 ] && tail -n 5 "$LOG" | grep -qi 'lock'; then
+            log "opkg lock is busy; retrying in ${RETRY_DELAY}s (attempt $((tries + 1))/3) ..."
+            sleep "$RETRY_DELAY"
+            continue
+        fi
         log "ERROR: opkg install failed (see the lines above)."
         rm -rf "$DL_DIR"
         return 1
-    fi
+    done
 
     # Remove the downloaded .ipk from /tmp.
     rm -rf "$DL_DIR"
