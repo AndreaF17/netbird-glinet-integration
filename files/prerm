@@ -2,6 +2,14 @@
 # Stop and disable the service before files are removed (live system only).
 [ -n "${IPKG_INSTROOT}" ] && exit 0
 
+# Upgrade (opkg exports PKG_UPGRADE=1): leave the daemon running. This package
+# ships no netbird binary -- an upgrade only replaces the wrapper/init/panel
+# files, which is safe under a running daemon -- while stopping it here would
+# drop the VPN for the whole upgrade (and for good, if postinst then fails to
+# re-download the payload postrm deleted). An old opkg without PKG_UPGRADE
+# just keeps the previous stop-then-redownload behavior.
+[ "${PKG_UPGRADE:-0}" = "1" ] && exit 0
+
 /etc/init.d/netbird stop 2>/dev/null || true
 /etc/init.d/netbird disable 2>/dev/null || true
 

@@ -5,6 +5,13 @@
 # GL web stack exists.
 [ -n "${IPKG_INSTROOT}" ] && exit 0
 
+# Upgrade (opkg exports PKG_UPGRADE=1; opkg passes no "upgrade" argument, the
+# case below only covers dpkg-style callers): leave everything in place. The
+# daemon keeps running (prerm skipped the stop), the payload stays on flash,
+# an in-flight panel-update's own lock/log must survive the install it is
+# driving, and the new postinst does the nginx restart once its files are in.
+[ "${PKG_UPGRADE:-0}" = "1" ] && exit 0
+
 # Drop NetBird's /tmp state: the binary extracted to RAM (compressed layout),
 # the connect/update logs and locks, and the self-update cache + scratch dir.
 rm -rf /tmp/netbird-runtime \

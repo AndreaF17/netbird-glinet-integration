@@ -121,6 +121,29 @@ cmd_check() {
     printf '%s\n' "$out" | tee "$CACHE"
 }
 
+# Failure fallback for the compressed layout. The small overlay forces the old
+# netbird.gz to be deleted before the new one is written, so an aborted install
+# would otherwise leave NO payload on flash: the running daemon survives (its
+# binary is open in RAM) but the next restart/reboot has nothing to extract.
+# The old UNCOMPRESSED binary normally still sits at $RUNTIME_DIR/netbird, so
+# recompress that back onto the flash. Always returns 0: the caller is already
+# on its failure path and must reach its own logging/return.
+restore_payload() {
+    if [ -f "$BIN_GZ" ]; then return 0; fi
+    if [ -x "$RUNTIME_DIR/netbird" ]; then
+        log "Restoring the previous netbird payload from RAM ..."
+        if gzip -9n < "$RUNTIME_DIR/netbird" > "${BIN_GZ}.part" 2>/dev/null \
+                && mv "${BIN_GZ}.part" "$BIN_GZ"; then
+            log "Previous payload restored; netbird keeps running the old version."
+            return 0
+        fi
+        rm -f "${BIN_GZ}.part"
+    fi
+    log "WARNING: no netbird payload left on flash. netbird keeps running until"
+    log "WARNING: the next restart/reboot -- retry the update before rebooting."
+    return 0
+}
+
 cmd_run() {
     : > "$LOG"
     log "Starting direct NetBird binary update."
@@ -168,26 +191,41 @@ cmd_run() {
     mkdir -p "$LIBEXEC"
     if [ -f "$BIN_GZ" ] || head -n1 "$PLAIN_BIN" 2>/dev/null | grep -q '^#!'; then
         log "Installing (compressed layout) ..."
-        # Remove the old payload BEFORE writing the new one: the ~24 MB overlay
-        # cannot hold two ~13 MB .gz copies, so an atomic .new+rename won't fit.
+        # The ~24 MB overlay cannot hold two ~13 MB .gz copies, so the old
+        # payload must be removed before the new one is written. But NEVER
+        # stream into the final path: the wrapper re-extracts whenever it sees
+        # netbird.gz newer than the extracted binary, so a half-written .gz
+        # makes every netbird invocation (panel status polls, procd respawn)
+        # fail for the whole multi-minute recompression. netbird.gz must be
+        # either absent (wrapper keeps using the extracted binary) or complete:
+        # write to a .part on the same filesystem, mv into place once valid.
         # The source tarball is already sha256-verified, so we trust the stream
         # and validate the result below.
-        rm -f "$BIN_GZ"
+        PART="${BIN_GZ}.part"
+        rm -f "$BIN_GZ" "$PART"
         # Stream the binary straight from the verified tarball into gzip -9 --
         # never materialising the ~37 MB uncompressed binary in RAM-backed /tmp.
         # gzip -9 (vs -1) saves ~1.4 MB on the tiny overlay for a one-time CPU
         # cost; decompression speed is unaffected by the level.
-        if ! tar -xzOf "$DL_DIR/$tarball" netbird 2>/dev/null | gzip -9n > "$BIN_GZ"; then
+        if ! tar -xzOf "$DL_DIR/$tarball" netbird 2>/dev/null | gzip -9n > "$PART"; then
             log "ERROR: extract/recompress pipeline failed (overlay full?). Aborting."
-            rm -f "$BIN_GZ"
+            rm -f "$PART"
+            restore_payload
             return 1
         fi
         # Validate: a plausibly-sized binary must decompress out (guards a
         # truncated extract that still produced a structurally-valid .gz).
-        nbytes="$(gunzip -c "$BIN_GZ" 2>/dev/null | wc -c)"
-        if [ ! -s "$BIN_GZ" ] || [ "${nbytes:-0}" -lt 20000000 ]; then
+        nbytes="$(gunzip -c "$PART" 2>/dev/null | wc -c)"
+        if [ ! -s "$PART" ] || [ "${nbytes:-0}" -lt 20000000 ]; then
             log "ERROR: recompressed binary failed validation (${nbytes:-0} bytes). Aborting."
-            rm -f "$BIN_GZ"
+            rm -f "$PART"
+            restore_payload
+            return 1
+        fi
+        if ! mv "$PART" "$BIN_GZ"; then
+            log "ERROR: could not move the new payload into place. Aborting."
+            rm -f "$PART"
+            restore_payload
             return 1
         fi
         rm -rf "$RUNTIME_DIR"          # force the wrapper to re-extract the new binary
@@ -204,6 +242,9 @@ cmd_run() {
 
     printf '%s\n' "$latest" > "$VERSION_FILE"
     rm -rf "$DL_DIR"
+    # The cached `check` result still claims an update is available; drop it
+    # so the panel's next check shows "Up to date" immediately.
+    rm -f "$CACHE"
 
     log "Restarting netbird daemon ..."
     "$INIT" restart >> "$LOG" 2>&1 || log "WARNING: daemon restart returned non-zero."

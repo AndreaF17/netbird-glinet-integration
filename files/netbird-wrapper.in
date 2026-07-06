@@ -14,15 +14,26 @@ BIN="$RUNTIME_DIR/netbird"
 
 if [ ! -x "$BIN" ] || [ "$BIN_GZ" -nt "$BIN" ]; then
 	mkdir -p "$RUNTIME_DIR"
+	# Reap temp files leaked by an earlier invocation killed mid-extract
+	# (e.g. by the panel's `timeout` around status calls): each one holds up
+	# to ~37 MB of RAM-backed /tmp. Age-gated so a live concurrent extract
+	# (its mtime advances as gunzip writes) is never touched.
+	find "$RUNTIME_DIR" -name 'netbird.*.tmp' -mmin +2 -exec rm -f {} + 2>/dev/null
 	TMP="$BIN.$$.tmp"
-	if ! gunzip -c "$BIN_GZ" > "$TMP"; then
+	if gunzip -c "$BIN_GZ" > "$TMP"; then
+		chmod 0755 "$TMP"
+		# Atomic rename: concurrent invocations each extract to their own
+		# $$-suffixed file and the last rename wins with a complete binary.
+		mv "$TMP" "$BIN"
+	else
 		rm -f "$TMP"
-		echo "netbird: failed to decompress $BIN_GZ (out of RAM in /tmp?)" >&2
-		exit 1
+		# A failed refresh (missing/partial .gz, no RAM) must not take a
+		# working client down: keep running the already-extracted binary.
+		if [ ! -x "$BIN" ]; then
+			echo "netbird: failed to decompress $BIN_GZ (out of RAM in /tmp?)" >&2
+			exit 1
+		fi
+		echo "netbird: could not refresh from $BIN_GZ; using the already-extracted binary" >&2
 	fi
-	chmod 0755 "$TMP"
-	# Atomic rename: concurrent invocations each extract to their own
-	# $$-suffixed file and the last rename wins with a complete binary.
-	mv "$TMP" "$BIN"
 fi
 exec "$BIN" "$@"

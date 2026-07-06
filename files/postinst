@@ -5,8 +5,10 @@
 [ -n "${IPKG_INSTROOT}" ] && exit 0
 
 # Drop binaries extracted to RAM by a previous version (compressed-binary
-# layout); the wrapper re-extracts the new one on first use.
-rm -rf /tmp/netbird-runtime
+# layout); the wrapper re-extracts the new one on first use. Skip on upgrade
+# (PKG_UPGRADE=1): the payload did not change and the daemon was left running,
+# so this would only force a pointless ~37 MB re-extract.
+[ "${PKG_UPGRADE:-0}" = "1" ] || rm -rf /tmp/netbird-runtime
 
 # netbird client (downloaded directly from the official netbird releases; this
 # package ships no binary). The updater only transfers a binary when needed:
